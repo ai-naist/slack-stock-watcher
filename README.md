@@ -19,7 +19,8 @@ Slackからのスラッシュコマンドを受信し、EventBridge Schedulerか
 
 ### 初期設定
 
-1. GitHubのRepository SecretsにAWSデプロイ用のIAMロールARNとSlackのSigning Secretを設定する必要がありますが、本プロジェクトではプレースホルダーとしています。
-2. `.github/workflows/deploy.yml` 内の以下の値を変更してください。
-   * `<YOUR_OIDC_ROLE_ARN>`: AWS IAM Identity Provider (OIDC) 用に設定されたデプロイ用ロールのARN
-   * `<YOUR_SLACK_SIGNING_SECRET>`: Slack Appの設定から取得できるSigning Secret（デプロイコマンドの引数）
+1. GitHubのRepository Secretsに以下を登録してください。
+  * `AWS_OIDC_ROLE_ARN`: AWS IAM Identity Provider (OIDC) 用に設定されたデプロイ用ロールのARN
+  * `SLACK_SIGNING_SECRET`: Slack Appの設定から取得できるSigning Secret
+2. 認証情報はGitHub Actionsから自動注入されるため、`template.yaml` や `src/app.py`、`.github/workflows/deploy.yml` にシークレット値を直接記述しないでください。
+3. `main` ブランチへPushすると、`.github/workflows/deploy.yml` に定義されたデプロイジョブが実行されます。
