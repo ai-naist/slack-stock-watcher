@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: MVP Serverless app for Slack Command and EventBridge Scheduler
+
+Parameters:
+  SlackSigningSecret:
+    Type: String
+    NoEcho: true
+    Description: "Slack Signing Secret"
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+
+Resources:
+  StockSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: StockSubscriptions
+      AttributeDefinitions:
+        - AttributeName: StockID
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: StockID
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  StockAppFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref StockSubscriptionsTable
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+      FunctionUrlConfig:
+        AuthType: NONE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StockSubscriptionsTable
+      Events:
+        DailyScheduler:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "rate(1 days)"
+            Input: '{"source": "scheduler", "detail-type": "Daily Execution"}'
+
+Outputs:
+  FunctionUrlEndpoint:
+    Description: "Function URL Endpoint for Slack"
+    Value: !GetAtt StockAppFunctionUrl.FunctionUrl
