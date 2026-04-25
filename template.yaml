@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: MVP Serverless app for Slack Command and EventBridge Scheduler
 
@@ -20,7 +20,7 @@ Resources:
   StockSubscriptionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: StockSubscriptions
+      TableName: !Sub "${AWS::StackName}-StockSubscriptions"
       AttributeDefinitions:
         - AttributeName: StockID
           AttributeType: S

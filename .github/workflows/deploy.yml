@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -37,9 +38,10 @@ jobs:
 
       - name: SAM Deploy
         run: |
+          BRANCH_NAME=$(echo ${GITHUB_REF#refs/heads/})
           sam deploy --no-confirm-changeset \
                      --no-fail-on-empty-changeset \
-                     --stack-name stock-notifier-mvp \
+                     --stack-name stock-notifier-mvp-${BRANCH_NAME} \
                      --capabilities CAPABILITY_IAM \
                      --resolve-s3 \
                      --parameter-overrides SlackSigningSecret=${{ secrets.SLACK_SIGNING_SECRET }}
