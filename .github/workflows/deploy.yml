@@ -39,9 +39,14 @@ jobs:
       - name: SAM Deploy
         run: |
           BRANCH_NAME=$(echo ${GITHUB_REF#refs/heads/})
+          if [ "$BRANCH_NAME" = "main" ]; then
+            SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET }}"
+          else
+            SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET_DEV }}"
+          fi
           sam deploy --no-confirm-changeset \
                      --no-fail-on-empty-changeset \
                      --stack-name stock-notifier-mvp-${BRANCH_NAME} \
                      --capabilities CAPABILITY_IAM \
                      --resolve-s3 \
-                     --parameter-overrides SlackSigningSecret=${{ secrets.SLACK_SIGNING_SECRET }}
+                     --parameter-overrides SlackSigningSecret=${SIGNING_SECRET}
