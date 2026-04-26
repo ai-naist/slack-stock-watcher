@@ -1,7 +1,7 @@
 # Serverless Stock Application (MVP)
 
 このプロジェクトは、AWS SAMを用いたサーバーレスアプリケーションの最小構成（MVP）です。
-Slackからのスラッシュコマンドを受信し、EventBridge Schedulerから定期的に処理を実行する機能を提供します。
+Slackからのスラッシュコマンドを受信し、EventBridgeのスケジュールルールから定期的に処理を実行する機能を提供します。
 
 ## アーキテクチャ
 
@@ -10,8 +10,8 @@ Slackからのスラッシュコマンドを受信し、EventBridge Schedulerか
   * Slackからのリクエストについては、別関数で署名検証（`X-Slack-Signature`）を行い、不正なリクエストをブロックします。
 * **Lambda Function URLs**: `AUTH_TYPE: NONE` でインターネットに公開され、Slackからのリクエストを受け付けます。
 * **Amazon DynamoDB**: `StockSubscriptions` テーブル。Partition Keyは `StockID` (String)、Sort Keyは `Timestamp` (String) です。
-* **Amazon EventBridge Scheduler**: 1日1回 (`rate(1 days)`) 定期実行を行います。
-  * Schedulerのイベントは `{"source": "scheduler", "detail-type": "Daily Execution"}` のような形式で送出される想定です。
+* **Amazon EventBridge ルール (スケジュール)**: 1日1回 (`rate(1 day)`) 定期実行を行います。
+  * 定期実行時には `{"source": "scheduler", "detail-type": "Daily Execution"}` を入力としてLambdaに渡します。
 
 ## デプロイ方法
 

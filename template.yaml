@@ -48,9 +48,11 @@ Resources:
             TableName: !Ref StockSubscriptionsTable
       Events:
         DailyScheduler:
-          Type: ScheduleV2
+          Type: Schedule
           Properties:
-            ScheduleExpression: "rate(1 days)"
+            Name: !Sub "${AWS::StackName}-daily-schedule"
+            Description: "Daily trigger for stock notifier"
+            Schedule: "rate(1 day)"
             Input: '{"source": "scheduler", "detail-type": "Daily Execution"}'
 
 Outputs:
