@@ -280,6 +280,41 @@ def test_deduplicate_news_by_url_normalization():
     assert deduped[1]["url"] == "https://example.com/path?id=2"
 
 
+def test_deduplicate_news_by_similar_title():
+    items = [
+        {
+            "title": "トヨタ，26年3月期は増益見通し - 日本経済新聞",
+            "url": "https://example.com/news/1",
+        },
+        {
+            "title": "トヨタ 26年3月期は増益見通し | 日経新聞",
+            "url": "https://example.com/news/2",
+        },
+    ]
+
+    deduped = deduplicate_news(items)
+
+    assert len(deduped) == 1
+    assert deduped[0]["url"] == "https://example.com/news/1"
+
+
+def test_deduplicate_news_keeps_distinct_titles():
+    items = [
+        {
+            "title": "トヨタ，26年3月期は増益見通し - 日本経済新聞",
+            "url": "https://example.com/news/1",
+        },
+        {
+            "title": "トヨタ，北米生産を増強へ - 日本経済新聞",
+            "url": "https://example.com/news/2",
+        },
+    ]
+
+    deduped = deduplicate_news(items)
+
+    assert len(deduped) == 2
+
+
 def test_find_stock_in_master_by_japanese_name_and_english_name():
     master_records = [
         {

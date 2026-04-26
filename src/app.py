@@ -6,6 +6,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -791,12 +792,34 @@ def normalize_title(title):
     normalized = " ".join((title or "").strip().split())
     if not normalized:
         return ""
-    return re.sub(r"\s+[-|｜－]\s+[^-|｜－]+$", "", normalized)
+    # 末尾の区切り記号以降が短い場合は媒体名の付与とみなして削除する
+    return re.sub(r"\s+[|\-｜－—–]\s+[^|\-｜－—–]{1,20}$", "", normalized)
+
+
+def is_similar_title(a, b, threshold=0.88):
+    if not a or not b:
+        return False
+
+    if a == b:
+        return True
+
+    a_norm = a.casefold()
+    b_norm = b.casefold()
+
+    shorter = min(len(a_norm), len(b_norm))
+    longer = max(len(a_norm), len(b_norm))
+    if shorter < 16:
+        return False
+    if longer == 0 or (longer - shorter) / longer > 0.25:
+        return False
+
+    return SequenceMatcher(None, a_norm, b_norm).ratio() >= threshold
 
 
 def deduplicate_news(items):
     deduped = []
-    seen = set()
+    seen_urls = set()
+    seen_titles = []
 
     for item in items:
         title = item.get("title") or ""
@@ -805,14 +828,28 @@ def deduplicate_news(items):
         url = (item.get("url") or "").strip()
         normalized_url = normalize_url(url)
 
-        dedupe_key = normalized_title if normalized_title else normalized_url
-        if not dedupe_key:
+        is_duplicate = False
+
+        if normalized_url and normalized_url in seen_urls:
+            is_duplicate = True
+
+        if not is_duplicate and normalized_title:
+            for existing_title in seen_titles:
+                if is_similar_title(normalized_title, existing_title):
+                    is_duplicate = True
+                    break
+
+        if not is_duplicate and not normalized_title and not normalized_url:
             continue
 
-        if dedupe_key in seen:
+        if is_duplicate:
             continue
 
-        seen.add(dedupe_key)
+        if normalized_url:
+            seen_urls.add(normalized_url)
+        if normalized_title:
+            seen_titles.append(normalized_title)
+
         copied = dict(item)
         copied["url"] = normalized_url
         deduped.append(copied)
