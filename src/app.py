@@ -4,10 +4,12 @@ import json
 import os
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 import boto3
 import requests
+from boto3.dynamodb.conditions import Attr
 
 dynamodb = boto3.resource("dynamodb")
 RUN_NEWS_COMMANDS = {
@@ -16,6 +18,8 @@ RUN_NEWS_COMMANDS = {
     "/run_stock_news",
     "/run_stock_news_dev",
 }
+MASTER_META_ID = "__META__"
+MASTER_META_SNAPSHOT_KEY = "LATEST"
 
 
 def get_env_int(name, default):
@@ -37,6 +41,245 @@ def parse_stock_input(text):
     stock_code = parts[0].upper()
     stock_name = parts[1].strip() if len(parts) > 1 else ""
     return stock_code, stock_name
+
+
+def normalize_text(text):
+    return "".join((text or "").strip().lower().split())
+
+
+def extract_search_candidates(text):
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return []
+
+    candidates = [normalized]
+    first_token = normalized.split(" ", 1)[0]
+    if first_token and first_token != normalized:
+        candidates.insert(0, first_token)
+    return candidates
+
+
+def extract_stock_code_variants(value):
+    stripped = (value or "").strip().upper()
+    if not stripped:
+        return []
+
+    variants = [stripped]
+    digits_only = "".join(ch for ch in stripped if ch.isdigit())
+    if digits_only:
+        if digits_only not in variants:
+            variants.append(digits_only)
+        if len(digits_only) == 4:
+            padded = f"{digits_only}0"
+            if padded not in variants:
+                variants.append(padded)
+    return variants
+
+
+def get_jquants_api_key():
+    return os.environ.get("JQUANTS_API_KEY", "").strip()
+
+
+def fetch_jquants_listed_info(api_key, timeout_seconds):
+    if not api_key:
+        return []
+
+    base_url = os.environ.get("JQUANTS_BASE_URL", "https://api.jquants.com/v2").strip()
+    endpoint = f"{base_url.rstrip('/')}/equities/master"
+    headers = {"x-api-key": api_key}
+
+    listed = []
+    pagination_key = None
+    while True:
+        params = {}
+        if pagination_key:
+            params["pagination_key"] = pagination_key
+
+        response = requests.get(
+            endpoint, headers=headers, params=params, timeout=timeout_seconds
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        page_items = payload.get("data")
+        if page_items is None:
+            page_items = payload.get("info")
+        if page_items is None:
+            page_items = []
+
+        listed.extend(page_items)
+        pagination_key = payload.get("pagination_key")
+        if not pagination_key:
+            break
+
+    return listed
+
+
+def get_master_snapshot(table):
+    response = table.get_item(
+        Key={"StockCode": MASTER_META_ID, "SnapshotAt": MASTER_META_SNAPSHOT_KEY}
+    )
+    item = response.get("Item", {})
+    return (item.get("CurrentSnapshotAt") or "").strip()
+
+
+def list_master_records_for_snapshot(table, snapshot_at):
+    if not snapshot_at:
+        return []
+
+    records = []
+    scan_kwargs = {
+        "FilterExpression": Attr("SnapshotAt").eq(snapshot_at)
+        & Attr("StockCode").ne(MASTER_META_ID)
+    }
+
+    while True:
+        response = table.scan(**scan_kwargs)
+        records.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+
+    return records
+
+
+def find_stock_in_master(master_records, raw_query):
+    candidates = []
+    for candidate in extract_search_candidates(raw_query):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    if not candidates:
+        return {"status": "not_found", "items": []}
+
+    by_code = {}
+    by_name_exact = {}
+    by_name_contains = {}
+
+    for query in candidates:
+        code_variants = extract_stock_code_variants(query)
+        norm_query = normalize_text(query)
+
+        for item in master_records:
+            code = (item.get("StockCode") or item.get("Code") or "").strip().upper()
+            if not code:
+                continue
+
+            co_name = (item.get("CoName") or item.get("StockName") or "").strip()
+            co_name_en = (item.get("CoNameEn") or "").strip()
+            norm_name = normalize_text(item.get("NormalizedCoName") or co_name)
+            norm_name_en = normalize_text(item.get("NormalizedCoNameEn") or co_name_en)
+
+            if code_variants:
+                for variant in code_variants:
+                    if code == variant or code.rstrip("0") == variant:
+                        by_code[code] = {
+                            "code": code,
+                            "name": co_name,
+                            "name_en": co_name_en,
+                        }
+
+            if not norm_query:
+                continue
+
+            if norm_query == norm_name or norm_query == norm_name_en:
+                by_name_exact[code] = {
+                    "code": code,
+                    "name": co_name,
+                    "name_en": co_name_en,
+                }
+            elif norm_query in norm_name or norm_query in norm_name_en:
+                by_name_contains[code] = {
+                    "code": code,
+                    "name": co_name,
+                    "name_en": co_name_en,
+                }
+
+    if len(by_code) == 1:
+        return {"status": "single", "items": list(by_code.values())}
+    if len(by_code) > 1:
+        return {
+            "status": "multiple",
+            "items": sorted(by_code.values(), key=lambda x: x["code"])[:5],
+        }
+
+    if len(by_name_exact) == 1:
+        return {"status": "single", "items": list(by_name_exact.values())}
+    if len(by_name_exact) > 1:
+        return {
+            "status": "multiple",
+            "items": sorted(by_name_exact.values(), key=lambda x: x["code"])[:5],
+        }
+
+    if len(by_name_contains) == 1:
+        return {"status": "single", "items": list(by_name_contains.values())}
+    if len(by_name_contains) > 1:
+        return {
+            "status": "multiple",
+            "items": sorted(by_name_contains.values(), key=lambda x: x["code"])[:5],
+        }
+
+    return {"status": "not_found", "items": []}
+
+
+def sync_stock_master(timeout_seconds):
+    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
+    if not master_table_name:
+        return {"synced": False, "reason": "master table not configured", "count": 0}
+
+    api_key = get_jquants_api_key()
+    if not api_key:
+        return {"synced": False, "reason": "api key not available", "count": 0}
+
+    listed_info = fetch_jquants_listed_info(api_key, timeout_seconds)
+    if not listed_info:
+        return {"synced": False, "reason": "listed info empty", "count": 0}
+
+    snapshot_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    table = dynamodb.Table(master_table_name)
+
+    count = 0
+    with table.batch_writer() as batch:
+        for row in listed_info:
+            code = (row.get("Code") or row.get("StockCode") or "").strip().upper()
+            if not code:
+                continue
+
+            co_name = (row.get("CoName") or "").strip()
+            co_name_en = (row.get("CoNameEn") or "").strip()
+
+            batch.put_item(
+                Item={
+                    "StockCode": code,
+                    "SnapshotAt": snapshot_at,
+                    "CoName": co_name,
+                    "CoNameEn": co_name_en,
+                    "S17": str(row.get("S17") or ""),
+                    "S17Nm": str(row.get("S17Nm") or ""),
+                    "S33": str(row.get("S33") or ""),
+                    "S33Nm": str(row.get("S33Nm") or ""),
+                    "Mkt": str(row.get("Mkt") or ""),
+                    "MktNm": str(row.get("MktNm") or ""),
+                    "Mrgn": str(row.get("Mrgn") or ""),
+                    "MrgnNm": str(row.get("MrgnNm") or ""),
+                    "NormalizedCoName": normalize_text(co_name),
+                    "NormalizedCoNameEn": normalize_text(co_name_en),
+                }
+            )
+            count += 1
+
+        batch.put_item(
+            Item={
+                "StockCode": MASTER_META_ID,
+                "SnapshotAt": MASTER_META_SNAPSHOT_KEY,
+                "CurrentSnapshotAt": snapshot_at,
+                "UpdatedAt": snapshot_at,
+                "Count": count,
+            }
+        )
+
+    return {"synced": True, "reason": "ok", "count": count}
 
 
 def build_search_query(stock_code, stock_name):
@@ -288,6 +531,15 @@ def execute_news_pipeline(trigger_source):
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 
     try:
+        sync_result = sync_stock_master(timeout_seconds)
+        print(
+            "Stock master sync result: "
+            f"synced={sync_result['synced']} reason={sync_result['reason']} count={sync_result['count']}"
+        )
+    except Exception as ex:
+        print(f"Stock master sync failed: {str(ex)}")
+
+    try:
         stocks = fetch_registered_stocks()
     except Exception as ex:
         print(f"Failed to load stocks from DynamoDB: {str(ex)}")
@@ -425,12 +677,48 @@ def handle_slack_event(event):
     if not text_param:
         return {
             "statusCode": 200,
-            "body": "証券コードを指定してください．例: /add_stock 7203 トヨタ",
+            "body": "検索キーを指定してください．例: /add_stock 7203 または /add_stock フィックスターズ",
         }
 
-    stock_code, stock_name = parse_stock_input(text_param)
-    if not stock_code:
-        return {"statusCode": 200, "body": "証券コードを指定してください．"}
+    stock_code = ""
+    stock_name = ""
+    stock_name_en = ""
+
+    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
+    if master_table_name:
+        master_table = dynamodb.Table(master_table_name)
+        snapshot_at = get_master_snapshot(master_table)
+        master_records = list_master_records_for_snapshot(master_table, snapshot_at)
+        lookup = find_stock_in_master(master_records, text_param)
+
+        if lookup["status"] == "multiple":
+            lines = ["候補が複数あります．証券コードで指定してください．"]
+            for item in lookup["items"]:
+                label = f"{item['code']} {item['name']}"
+                if item["name_en"]:
+                    label = f"{label} ({item['name_en']})"
+                lines.append(f"・{label}")
+            return {"statusCode": 200, "body": "\n".join(lines)}
+
+        if lookup["status"] == "single":
+            matched = lookup["items"][0]
+            stock_code = matched["code"]
+            stock_name = matched["name"]
+            stock_name_en = matched["name_en"]
+        else:
+            return {
+                "statusCode": 200,
+                "body": "銘柄マスタに該当がありませんでした．定期同期後に再試行してください．",
+            }
+    else:
+        parsed_code, parsed_name = parse_stock_input(text_param)
+        if not parsed_code:
+            return {
+                "statusCode": 200,
+                "body": "検索キーを指定してください．",
+            }
+        stock_code = parsed_code
+        stock_name = parsed_name
 
     table_name = os.environ.get("TABLE_NAME")
     table = dynamodb.Table(table_name)
@@ -442,11 +730,22 @@ def handle_slack_event(event):
             "StockID": stock_code,
             "StockCode": stock_code,
             "StockName": stock_name,
+            "StockNameEn": stock_name_en,
             "Timestamp": timestamp_str,
         }
     )
 
-    return {"statusCode": 200, "body": f"StockID: {stock_code} を登録しました"}
+    name_label = stock_name if stock_name else "（未設定）"
+    name_en_label = stock_name_en if stock_name_en else "（未設定）"
+    return {
+        "statusCode": 200,
+        "body": (
+            "銘柄を登録しました．"
+            f"\n証券コード: {stock_code}"
+            f"\n企業名: {name_label}"
+            f"\n企業名(英語): {name_en_label}"
+        ),
+    }
 
 
 def handle_scheduler_event(event):

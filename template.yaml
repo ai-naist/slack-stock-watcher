@@ -33,6 +33,15 @@ Parameters:
     Type: Number
     Description: "Maximum number of market overview news entries in Slack message"
     Default: 8
+  JQuantsApiKey:
+    Type: String
+    NoEcho: true
+    Description: "J-Quants API key"
+    Default: ""
+  JQuantsBaseUrl:
+    Type: String
+    Description: "J-Quants API base URL"
+    Default: "https://api.jquants.com"
 
 Globals:
   Function:
@@ -58,6 +67,21 @@ Resources:
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
 
+  StockMasterTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: StockCode
+          AttributeType: S
+        - AttributeName: SnapshotAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: StockCode
+          KeyType: HASH
+        - AttributeName: SnapshotAt
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
   StockAppFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -66,6 +90,7 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref StockSubscriptionsTable
+          MASTER_TABLE_NAME: !Ref StockMasterTable
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
           SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
           NEWS_API_KEY: !Ref NewsApiKey
@@ -73,11 +98,15 @@ Resources:
           HTTP_TIMEOUT_SECONDS: !Ref HttpTimeoutSeconds
           MAX_NEWS_PER_STOCK: !Ref MaxNewsPerStock
           MAX_MARKET_NEWS: !Ref MaxMarketNews
+          JQUANTS_API_KEY: !Ref JQuantsApiKey
+          JQUANTS_BASE_URL: !Ref JQuantsBaseUrl
       FunctionUrlConfig:
         AuthType: NONE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StockSubscriptionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StockMasterTable
       Events:
         DailyScheduler:
           Type: Schedule
