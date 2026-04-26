@@ -50,8 +50,6 @@ Resources:
         DailyScheduler:
           Type: Schedule
           Properties:
-            Name: !Sub "${AWS::StackName}-daily-schedule"
-            Description: "Daily trigger for stock notifier"
             Schedule: "rate(1 day)"
             Input: '{"source": "scheduler", "detail-type": "Daily Execution"}'
 
