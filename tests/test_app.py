@@ -158,6 +158,67 @@ def test_slack_event_run_news_command(mock_execute_news_pipeline, mock_dynamodb)
     mock_dynamodb.Table.assert_not_called()
 
 
+@patch("src.app.initialize_stock_master")
+def test_slack_event_run_master_init_command(mock_initialize_stock_master):
+    mock_initialize_stock_master.return_value = {
+        "synced": True,
+        "mode": "init",
+        "reason": "ok",
+        "count": 3,
+        "upserted": 3,
+        "deleted": 10,
+    }
+
+    body_str = "token=dummy&team_id=T0001&command=/run_master&text=init"
+    headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
+
+    event = {
+        "requestContext": {"http": {}},
+        "headers": headers,
+        "body": body,
+        "isBase64Encoded": False,
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "銘柄マスタ初期化を実行しました．" in response["body"]
+    assert "登録件数: 3件" in response["body"]
+    assert "削除件数: 10件" in response["body"]
+    mock_initialize_stock_master.assert_called_once()
+
+
+@patch("src.app.apply_stock_master_diff")
+def test_slack_event_run_master_diff_command(mock_apply_stock_master_diff):
+    mock_apply_stock_master_diff.return_value = {
+        "synced": True,
+        "mode": "diff",
+        "reason": "ok",
+        "count": 120,
+        "upserted": 4,
+        "deleted": 1,
+    }
+
+    body_str = "token=dummy&team_id=T0001&command=/run_master&text=diff"
+    headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
+
+    event = {
+        "requestContext": {"http": {}},
+        "headers": headers,
+        "body": body,
+        "isBase64Encoded": False,
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "銘柄マスタ差分適用を実行しました．" in response["body"]
+    assert "適用件数: 4件" in response["body"]
+    assert "削除件数: 1件" in response["body"]
+    assert "有効件数: 120件" in response["body"]
+    mock_apply_stock_master_diff.assert_called_once()
+
+
 def test_deduplicate_news_by_url_normalization():
     items = [
         {"title": "A", "url": "https://example.com/path?utm_source=abc&id=1"},

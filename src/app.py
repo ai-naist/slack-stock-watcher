@@ -18,6 +18,12 @@ RUN_NEWS_COMMANDS = {
     "/run_stock_news",
     "/run_stock_news_dev",
 }
+RUN_MASTER_COMMANDS = {
+    "/run_master",
+    "/run_master_dev",
+    "/run_stock_master",
+    "/run_stock_master_dev",
+}
 MASTER_META_ID = "__META__"
 MASTER_META_SNAPSHOT_KEY = "LATEST"
 
@@ -223,50 +229,43 @@ def find_stock_in_master(master_records, raw_query):
     return {"status": "not_found", "items": []}
 
 
-def sync_stock_master(timeout_seconds):
-    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
-    if not master_table_name:
-        return {"synced": False, "reason": "master table not configured", "count": 0}
+def build_master_payload(row):
+    co_name = (row.get("CoName") or "").strip()
+    co_name_en = (row.get("CoNameEn") or "").strip()
+    return {
+        "CoName": co_name,
+        "CoNameEn": co_name_en,
+        "S17": str(row.get("S17") or ""),
+        "S17Nm": str(row.get("S17Nm") or ""),
+        "S33": str(row.get("S33") or ""),
+        "S33Nm": str(row.get("S33Nm") or ""),
+        "Mkt": str(row.get("Mkt") or ""),
+        "MktNm": str(row.get("MktNm") or ""),
+        "Mrgn": str(row.get("Mrgn") or ""),
+        "MrgnNm": str(row.get("MrgnNm") or ""),
+        "NormalizedCoName": normalize_text(co_name),
+        "NormalizedCoNameEn": normalize_text(co_name_en),
+    }
 
-    api_key = get_jquants_api_key()
-    if not api_key:
-        return {"synced": False, "reason": "api key not available", "count": 0}
 
-    listed_info = fetch_jquants_listed_info(api_key, timeout_seconds)
-    if not listed_info:
-        return {"synced": False, "reason": "listed info empty", "count": 0}
+def get_master_row_code(row):
+    return (row.get("Code") or row.get("StockCode") or "").strip().upper()
 
-    snapshot_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    table = dynamodb.Table(master_table_name)
 
+def write_master_snapshot(table, listed_info, snapshot_at):
     count = 0
     with table.batch_writer() as batch:
         for row in listed_info:
-            code = (row.get("Code") or row.get("StockCode") or "").strip().upper()
+            code = get_master_row_code(row)
             if not code:
                 continue
 
-            co_name = (row.get("CoName") or "").strip()
-            co_name_en = (row.get("CoNameEn") or "").strip()
-
-            batch.put_item(
-                Item={
-                    "StockCode": code,
-                    "SnapshotAt": snapshot_at,
-                    "CoName": co_name,
-                    "CoNameEn": co_name_en,
-                    "S17": str(row.get("S17") or ""),
-                    "S17Nm": str(row.get("S17Nm") or ""),
-                    "S33": str(row.get("S33") or ""),
-                    "S33Nm": str(row.get("S33Nm") or ""),
-                    "Mkt": str(row.get("Mkt") or ""),
-                    "MktNm": str(row.get("MktNm") or ""),
-                    "Mrgn": str(row.get("Mrgn") or ""),
-                    "MrgnNm": str(row.get("MrgnNm") or ""),
-                    "NormalizedCoName": normalize_text(co_name),
-                    "NormalizedCoNameEn": normalize_text(co_name_en),
-                }
-            )
+            item = {
+                "StockCode": code,
+                "SnapshotAt": snapshot_at,
+            }
+            item.update(build_master_payload(row))
+            batch.put_item(Item=item)
             count += 1
 
         batch.put_item(
@@ -279,7 +278,191 @@ def sync_stock_master(timeout_seconds):
             }
         )
 
-    return {"synced": True, "reason": "ok", "count": count}
+    return count
+
+
+def clear_master_table(table):
+    keys = []
+    scan_kwargs = {
+        "ProjectionExpression": "StockCode, SnapshotAt",
+    }
+
+    while True:
+        response = table.scan(**scan_kwargs)
+        for item in response.get("Items", []):
+            stock_code = (item.get("StockCode") or "").strip()
+            snapshot_at = (item.get("SnapshotAt") or "").strip()
+            if stock_code and snapshot_at:
+                keys.append({"StockCode": stock_code, "SnapshotAt": snapshot_at})
+
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+
+    if not keys:
+        return 0
+
+    with table.batch_writer() as batch:
+        for key in keys:
+            batch.delete_item(Key=key)
+
+    return len(keys)
+
+
+def initialize_stock_master(timeout_seconds):
+    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
+    if not master_table_name:
+        return {
+            "synced": False,
+            "mode": "init",
+            "reason": "master table not configured",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    api_key = get_jquants_api_key()
+    if not api_key:
+        return {
+            "synced": False,
+            "mode": "init",
+            "reason": "api key not available",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    listed_info = fetch_jquants_listed_info(api_key, timeout_seconds)
+    if not listed_info:
+        return {
+            "synced": False,
+            "mode": "init",
+            "reason": "listed info empty",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    snapshot_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    table = dynamodb.Table(master_table_name)
+    deleted_count = clear_master_table(table)
+    upserted_count = write_master_snapshot(table, listed_info, snapshot_at)
+
+    return {
+        "synced": True,
+        "mode": "init",
+        "reason": "ok",
+        "count": upserted_count,
+        "upserted": upserted_count,
+        "deleted": deleted_count,
+    }
+
+
+def apply_stock_master_diff(timeout_seconds):
+    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
+    if not master_table_name:
+        return {
+            "synced": False,
+            "mode": "diff",
+            "reason": "master table not configured",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    api_key = get_jquants_api_key()
+    if not api_key:
+        return {
+            "synced": False,
+            "mode": "diff",
+            "reason": "api key not available",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    listed_info = fetch_jquants_listed_info(api_key, timeout_seconds)
+    if not listed_info:
+        return {
+            "synced": False,
+            "mode": "diff",
+            "reason": "listed info empty",
+            "count": 0,
+            "upserted": 0,
+            "deleted": 0,
+        }
+
+    table = dynamodb.Table(master_table_name)
+    snapshot_at = get_master_snapshot(table)
+    if not snapshot_at:
+        return initialize_stock_master(timeout_seconds)
+
+    existing_records = list_master_records_for_snapshot(table, snapshot_at)
+    existing_map = {}
+    for item in existing_records:
+        code = get_master_row_code(item)
+        if code:
+            existing_map[code] = item
+
+    latest_map = {}
+    for row in listed_info:
+        code = get_master_row_code(row)
+        if not code:
+            continue
+        latest_map[code] = build_master_payload(row)
+
+    upsert_items = []
+    for code, payload in latest_map.items():
+        existing = existing_map.get(code)
+        if existing is None:
+            upsert_items.append((code, payload))
+            continue
+
+        current_payload = build_master_payload(existing)
+        if payload != current_payload:
+            upsert_items.append((code, payload))
+
+    delete_codes = []
+    for code in existing_map.keys():
+        if code not in latest_map:
+            delete_codes.append(code)
+
+    with table.batch_writer() as batch:
+        for code, payload in upsert_items:
+            item = {"StockCode": code, "SnapshotAt": snapshot_at}
+            item.update(payload)
+            batch.put_item(Item=item)
+
+        for code in delete_codes:
+            batch.delete_item(Key={"StockCode": code, "SnapshotAt": snapshot_at})
+
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        batch.put_item(
+            Item={
+                "StockCode": MASTER_META_ID,
+                "SnapshotAt": MASTER_META_SNAPSHOT_KEY,
+                "CurrentSnapshotAt": snapshot_at,
+                "UpdatedAt": updated_at,
+                "Count": len(latest_map),
+                "LastMode": "diff",
+                "Upserted": len(upsert_items),
+                "Deleted": len(delete_codes),
+            }
+        )
+
+    return {
+        "synced": True,
+        "mode": "diff",
+        "reason": "ok",
+        "count": len(latest_map),
+        "upserted": len(upsert_items),
+        "deleted": len(delete_codes),
+    }
+
+
+def sync_stock_master(timeout_seconds):
+    return apply_stock_master_diff(timeout_seconds)
 
 
 def build_search_query(stock_code, stock_name):
@@ -531,9 +714,10 @@ def execute_news_pipeline(trigger_source):
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 
     try:
-        sync_result = sync_stock_master(timeout_seconds)
+        sync_result = apply_stock_master_diff(timeout_seconds)
         print(
             "Stock master sync result: "
+            f"mode={sync_result.get('mode', 'unknown')} "
             f"synced={sync_result['synced']} reason={sync_result['reason']} count={sync_result['count']}"
         )
     except Exception as ex:
@@ -672,6 +856,40 @@ def handle_slack_event(event):
                 f"銘柄ニュース: {result['stock_articles']}件，"
                 f"全体ニュース: {result['market_articles']}件．"
             ),
+        }
+
+    if command_name in RUN_MASTER_COMMANDS:
+        timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
+        action = text_param.strip().lower() if text_param else "diff"
+
+        if action in {"init", "initialize", "reset"}:
+            result = initialize_stock_master(timeout_seconds)
+            return {
+                "statusCode": 200,
+                "body": (
+                    "銘柄マスタ初期化を実行しました．"
+                    f"\n結果: {result['reason']}"
+                    f"\n登録件数: {result['upserted']}件"
+                    f"\n削除件数: {result['deleted']}件"
+                ),
+            }
+
+        if action in {"diff", "update", "patch"}:
+            result = apply_stock_master_diff(timeout_seconds)
+            return {
+                "statusCode": 200,
+                "body": (
+                    "銘柄マスタ差分適用を実行しました．"
+                    f"\n結果: {result['reason']}"
+                    f"\n適用件数: {result['upserted']}件"
+                    f"\n削除件数: {result['deleted']}件"
+                    f"\n有効件数: {result['count']}件"
+                ),
+            }
+
+        return {
+            "statusCode": 200,
+            "body": "実行方法: /run_master init または /run_master diff",
         }
 
     if not text_param:
