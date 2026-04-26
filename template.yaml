@@ -7,11 +7,37 @@ Parameters:
     Type: String
     NoEcho: true
     Description: "Slack Signing Secret"
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: "Slack Incoming Webhook URL"
+    Default: ""
+  NewsApiKey:
+    Type: String
+    NoEcho: true
+    Description: "NewsAPI Key"
+    Default: ""
+  NewsApiUrl:
+    Type: String
+    Description: "NewsAPI Endpoint URL"
+    Default: "https://newsapi.org/v2/everything"
+  HttpTimeoutSeconds:
+    Type: Number
+    Description: "HTTP timeout for news fetch operations"
+    Default: 5
+  MaxNewsPerStock:
+    Type: Number
+    Description: "Maximum number of news entries per stock in Slack message"
+    Default: 5
+  MaxMarketNews:
+    Type: Number
+    Description: "Maximum number of market overview news entries in Slack message"
+    Default: 8
 
 Globals:
   Function:
-    Timeout: 10
-    MemorySize: 128
+    Timeout: 30
+    MemorySize: 256
     Runtime: python3.12
     Architectures:
       - x86_64
@@ -41,6 +67,12 @@ Resources:
         Variables:
           TABLE_NAME: !Ref StockSubscriptionsTable
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
+          NEWS_API_KEY: !Ref NewsApiKey
+          NEWS_API_URL: !Ref NewsApiUrl
+          HTTP_TIMEOUT_SECONDS: !Ref HttpTimeoutSeconds
+          MAX_NEWS_PER_STOCK: !Ref MaxNewsPerStock
+          MAX_MARKET_NEWS: !Ref MaxMarketNews
       FunctionUrlConfig:
         AuthType: NONE
       Policies:

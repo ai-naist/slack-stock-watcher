@@ -42,8 +42,12 @@ jobs:
           STACK_NAME="stock-notifier-mvp-${BRANCH_NAME}"
           if [ "$BRANCH_NAME" = "main" ]; then
             SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET }}"
+            SLACK_WEBHOOK_URL="${{ secrets.SLACK_WEBHOOK_URL }}"
+            NEWS_API_KEY="${{ secrets.NEWS_API_KEY }}"
           else
             SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET_DEV }}"
+            SLACK_WEBHOOK_URL="${{ secrets.SLACK_WEBHOOK_URL_DEV }}"
+            NEWS_API_KEY="${{ secrets.NEWS_API_KEY_DEV }}"
           fi
           set +e
           sam deploy --no-confirm-changeset \
@@ -51,7 +55,10 @@ jobs:
                      --stack-name ${STACK_NAME} \
                      --capabilities CAPABILITY_IAM \
                      --resolve-s3 \
-                     --parameter-overrides SlackSigningSecret=${SIGNING_SECRET}
+                     --parameter-overrides \
+                     "SlackSigningSecret=${SIGNING_SECRET}" \
+                     "SlackWebhookUrl=${SLACK_WEBHOOK_URL}" \
+                     "NewsApiKey=${NEWS_API_KEY}"
           DEPLOY_EXIT_CODE=$?
           set -e
 
