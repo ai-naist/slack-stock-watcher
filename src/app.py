@@ -9,6 +9,12 @@ import boto3
 import requests
 
 dynamodb = boto3.resource('dynamodb')
+RUN_NEWS_COMMANDS = {
+    '/run_news',
+    '/run_news_dev',
+    '/run_stock_news',
+    '/run_stock_news_dev'
+}
 
 
 def get_env_int(name, default):
@@ -277,91 +283,9 @@ def format_slack_message(stock_news_map, market_news):
 
     return "\n".join(lines)
 
-def verify_slack_signature(headers, body, secret):
-    """
-    Slackからのリクエストに対する署名検証を行う
-    """
-    # ヘッダー名が小文字で来る場合も考慮
-    headers_lower = {k.lower(): v for k, v in headers.items()}
 
-    slack_signature = headers_lower.get('x-slack-signature')
-    slack_request_timestamp = headers_lower.get('x-slack-request-timestamp')
-
-    if not slack_signature or not slack_request_timestamp:
-        return False
-
-    # タイムスタンプが5分以上古い場合はリプレイ攻撃とみなす
-    if abs(time.time() - int(slack_request_timestamp)) > 60 * 5:
-        return False
-
-    sig_basestring = f'v0:{slack_request_timestamp}:{body}'
-    my_signature = 'v0=' + hmac.new(
-        secret.encode('utf-8'),
-        sig_basestring.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-
-    return hmac.compare_digest(my_signature, slack_signature)
-
-def handle_slack_event(event):
-    """
-    Slackのコマンドを受信してDynamoDBに書き込む処理
-    """
-    headers = event.get('headers', {})
-    body = event.get('body', '')
-    is_base64_encoded = event.get('isBase64Encoded', False)
-
-    if is_base64_encoded:
-        import base64
-        body = base64.b64decode(body).decode('utf-8')
-
-    secret = os.environ.get('SLACK_SIGNING_SECRET', '')
-
-    if not verify_slack_signature(headers, body, secret):
-        return {
-            'statusCode': 401,
-            'body': 'Unauthorized'
-        }
-
-    # URLエンコードされたフォームデータをパース
-    parsed_body = parse_qs(body)
-
-    text_param = parsed_body.get('text', [''])[0].strip()
-
-    if not text_param:
-        return {
-            'statusCode': 200,
-            'body': '証券コードを指定してください．例: /add_stock 7203 トヨタ'
-        }
-
-    stock_code, stock_name = parse_stock_input(text_param)
-    if not stock_code:
-        return {
-            'statusCode': 200,
-            'body': '証券コードを指定してください．'
-        }
-
-    table_name = os.environ.get('TABLE_NAME')
-    table = dynamodb.Table(table_name)
-
-    timestamp_str = 'LATEST'
-
-    table.put_item(
-        Item={
-            'StockID': stock_code,
-            'StockCode': stock_code,
-            'StockName': stock_name,
-            'Timestamp': timestamp_str
-        }
-    )
-
-    return {
-        'statusCode': 200,
-        'body': f'StockID: {stock_code} を登録しました'
-    }
-
-def handle_scheduler_event(event):
-    print(f"Received scheduler event: {json.dumps(event, ensure_ascii=False)}")
+def execute_news_pipeline(trigger_source):
+    print(f"Start news pipeline: {trigger_source}")
 
     timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
     max_per_stock = get_env_int("MAX_NEWS_PER_STOCK", 5)
@@ -415,11 +339,122 @@ def handle_scheduler_event(event):
         market_news = []
 
     message = format_slack_message(stock_news_map, market_news)
-
+    posted = False
     try:
-        post_to_slack(webhook_url, message, timeout_seconds)
+        posted = post_to_slack(webhook_url, message, timeout_seconds)
     except Exception as ex:
         print(f"Slack post failed: {str(ex)}")
+
+    stock_article_count = 0
+    for payload in stock_news_map.values():
+        stock_article_count += len(payload["items"])
+
+    return {
+        "stocks": len(stock_news_map),
+        "stock_articles": stock_article_count,
+        "market_articles": len(market_news),
+        "posted": posted
+    }
+
+def verify_slack_signature(headers, body, secret):
+    """
+    Slackからのリクエストに対する署名検証を行う
+    """
+    # ヘッダー名が小文字で来る場合も考慮
+    headers_lower = {k.lower(): v for k, v in headers.items()}
+
+    slack_signature = headers_lower.get('x-slack-signature')
+    slack_request_timestamp = headers_lower.get('x-slack-request-timestamp')
+
+    if not slack_signature or not slack_request_timestamp:
+        return False
+
+    # タイムスタンプが5分以上古い場合はリプレイ攻撃とみなす
+    if abs(time.time() - int(slack_request_timestamp)) > 60 * 5:
+        return False
+
+    sig_basestring = f'v0:{slack_request_timestamp}:{body}'
+    my_signature = 'v0=' + hmac.new(
+        secret.encode('utf-8'),
+        sig_basestring.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(my_signature, slack_signature)
+
+def handle_slack_event(event):
+    """
+    Slackのコマンドを受信してDynamoDBに書き込む処理
+    """
+    headers = event.get('headers', {})
+    body = event.get('body', '')
+    is_base64_encoded = event.get('isBase64Encoded', False)
+
+    if is_base64_encoded:
+        import base64
+        body = base64.b64decode(body).decode('utf-8')
+
+    secret = os.environ.get('SLACK_SIGNING_SECRET', '')
+
+    if not verify_slack_signature(headers, body, secret):
+        return {
+            'statusCode': 401,
+            'body': 'Unauthorized'
+        }
+
+    # URLエンコードされたフォームデータをパース
+    parsed_body = parse_qs(body)
+
+    command_name = parsed_body.get('command', [''])[0].strip()
+    text_param = parsed_body.get('text', [''])[0].strip()
+
+    if command_name in RUN_NEWS_COMMANDS:
+        result = execute_news_pipeline(f"slack:{command_name}")
+        return {
+            'statusCode': 200,
+            'body': (
+                f"ニュース収集を実行しました．"
+                f"対象銘柄: {result['stocks']}件，"
+                f"銘柄ニュース: {result['stock_articles']}件，"
+                f"全体ニュース: {result['market_articles']}件．"
+            )
+        }
+
+    if not text_param:
+        return {
+            'statusCode': 200,
+            'body': '証券コードを指定してください．例: /add_stock 7203 トヨタ'
+        }
+
+    stock_code, stock_name = parse_stock_input(text_param)
+    if not stock_code:
+        return {
+            'statusCode': 200,
+            'body': '証券コードを指定してください．'
+        }
+
+    table_name = os.environ.get('TABLE_NAME')
+    table = dynamodb.Table(table_name)
+
+    timestamp_str = 'LATEST'
+
+    table.put_item(
+        Item={
+            'StockID': stock_code,
+            'StockCode': stock_code,
+            'StockName': stock_name,
+            'Timestamp': timestamp_str
+        }
+    )
+
+    return {
+        'statusCode': 200,
+        'body': f'StockID: {stock_code} を登録しました'
+    }
+
+def handle_scheduler_event(event):
+    print(f"Received scheduler event: {json.dumps(event, ensure_ascii=False)}")
+    execute_news_pipeline("scheduler")
 
     return {
         'statusCode': 200,

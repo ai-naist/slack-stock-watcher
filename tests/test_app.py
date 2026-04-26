@@ -105,32 +105,14 @@ def test_slack_event_invalid_signature(mock_dynamodb):
     mock_table.put_item.assert_not_called()
 
 
-@patch('src.app.post_to_slack')
-@patch('src.app.fetch_market_overview_news')
-@patch('src.app.fetch_newsapi_news')
-@patch('src.app.fetch_google_news_rss')
-@patch('src.app.fetch_yahoo_finance_rss')
-@patch('src.app.fetch_registered_stocks')
-def test_scheduler_event_success(
-    mock_fetch_registered_stocks,
-    mock_fetch_yahoo,
-    mock_fetch_google,
-    mock_fetch_newsapi,
-    mock_fetch_market,
-    mock_post_to_slack
-):
-    mock_fetch_registered_stocks.return_value = [{'code': '7203', 'name': 'トヨタ'}]
-    mock_fetch_yahoo.return_value = [
-        {'title': 'Yahoo News', 'url': 'https://example.com/a?utm_source=yahoo', 'stock_code': '7203', 'stock_name': 'トヨタ'}
-    ]
-    mock_fetch_google.return_value = [
-        {'title': 'Google News', 'url': 'https://example.com/a', 'stock_code': '7203', 'stock_name': 'トヨタ'}
-    ]
-    mock_fetch_newsapi.return_value = []
-    mock_fetch_market.return_value = [
-        {'title': 'Market News', 'url': 'https://example.com/market', 'stock_code': 'MARKET', 'stock_name': '全体関連'}
-    ]
-    mock_post_to_slack.return_value = True
+@patch('src.app.execute_news_pipeline')
+def test_scheduler_event_success(mock_execute_news_pipeline):
+    mock_execute_news_pipeline.return_value = {
+        'stocks': 1,
+        'stock_articles': 2,
+        'market_articles': 1,
+        'posted': True
+    }
 
     event = {
         'source': 'scheduler',
@@ -141,7 +123,36 @@ def test_scheduler_event_success(
 
     assert response['statusCode'] == 200
     assert response['body'] == 'Scheduler event processed successfully.'
-    mock_post_to_slack.assert_called_once()
+    mock_execute_news_pipeline.assert_called_once_with('scheduler')
+
+
+@patch('src.app.dynamodb')
+@patch('src.app.execute_news_pipeline')
+def test_slack_event_run_news_command(mock_execute_news_pipeline, mock_dynamodb):
+    mock_execute_news_pipeline.return_value = {
+        'stocks': 2,
+        'stock_articles': 4,
+        'market_articles': 3,
+        'posted': True
+    }
+
+    body_str = 'token=dummy&team_id=T0001&command=/run_news&text='
+    headers, body = generate_valid_slack_headers_and_body(body_str, 'test_secret')
+
+    event = {
+        'requestContext': {'http': {}},
+        'headers': headers,
+        'body': body,
+        'isBase64Encoded': False
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response['statusCode'] == 200
+    assert 'ニュース収集を実行しました．' in response['body']
+    assert '対象銘柄: 2件' in response['body']
+    mock_execute_news_pipeline.assert_called_once_with('slack:/run_news')
+    mock_dynamodb.Table.assert_not_called()
 
 
 def test_deduplicate_news_by_url_normalization():
