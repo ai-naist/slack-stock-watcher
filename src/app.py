@@ -1,19 +1,20 @@
-import os
-import json
-import hmac
 import hashlib
+import hmac
+import json
+import os
 import time
-from urllib.parse import parse_qs, urlsplit, urlunsplit, parse_qsl, urlencode
 import xml.etree.ElementTree as ET
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
+
 import boto3
 import requests
 
-dynamodb = boto3.resource('dynamodb')
+dynamodb = boto3.resource("dynamodb")
 RUN_NEWS_COMMANDS = {
-    '/run_news',
-    '/run_news_dev',
-    '/run_stock_news',
-    '/run_stock_news_dev'
+    "/run_news",
+    "/run_news_dev",
+    "/run_stock_news",
+    "/run_stock_news_dev",
 }
 
 
@@ -56,14 +57,16 @@ def parse_rss_items(xml_text, source_name, stock_code, stock_name, max_items):
         if not title or not url:
             continue
 
-        items.append({
-            "source": source_name,
-            "title": title,
-            "url": url,
-            "published_at": published_at,
-            "stock_code": stock_code,
-            "stock_name": stock_name
-        })
+        items.append(
+            {
+                "source": source_name,
+                "title": title,
+                "url": url,
+                "published_at": published_at,
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+            }
+        )
 
         if len(items) >= max_items:
             break
@@ -107,7 +110,7 @@ def deduplicate_news(items):
 
 
 def fetch_registered_stocks():
-    table_name = os.environ.get('TABLE_NAME')
+    table_name = os.environ.get("TABLE_NAME")
     if not table_name:
         return []
 
@@ -127,11 +130,7 @@ def fetch_registered_stocks():
             existing = stock_map.get(code)
 
             if existing is None or timestamp >= existing.get("timestamp", ""):
-                stock_map[code] = {
-                    "code": code,
-                    "name": name,
-                    "timestamp": timestamp
-                }
+                stock_map[code] = {"code": code, "name": name, "timestamp": timestamp}
 
         last_key = response.get("LastEvaluatedKey")
         if not last_key:
@@ -140,42 +139,38 @@ def fetch_registered_stocks():
 
     normalized_stocks = []
     for code in sorted(stock_map.keys()):
-        normalized_stocks.append({
-            "code": stock_map[code]["code"],
-            "name": stock_map[code]["name"]
-        })
+        normalized_stocks.append(
+            {"code": stock_map[code]["code"], "name": stock_map[code]["name"]}
+        )
     return normalized_stocks
 
 
 def fetch_yahoo_finance_rss(stock, max_items, timeout_seconds):
     endpoint = "https://feeds.finance.yahoo.com/rss/2.0/headline"
-    params = {
-        "s": stock["code"],
-        "region": "JP",
-        "lang": "ja-JP"
-    }
+    params = {"s": stock["code"], "region": "JP", "lang": "ja-JP"}
 
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
     response.raise_for_status()
-    return parse_rss_items(response.text, "yahoo_finance_rss", stock["code"], stock["name"], max_items)
+    return parse_rss_items(
+        response.text, "yahoo_finance_rss", stock["code"], stock["name"], max_items
+    )
 
 
 def fetch_google_news_rss(stock, max_items, timeout_seconds):
     endpoint = "https://news.google.com/rss/search"
     query = build_search_query(stock["code"], stock["name"])
-    params = {
-        "q": query,
-        "hl": "ja",
-        "gl": "JP",
-        "ceid": "JP:ja"
-    }
+    params = {"q": query, "hl": "ja", "gl": "JP", "ceid": "JP:ja"}
 
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
     response.raise_for_status()
-    return parse_rss_items(response.text, "google_news_rss", stock["code"], stock["name"], max_items)
+    return parse_rss_items(
+        response.text, "google_news_rss", stock["code"], stock["name"], max_items
+    )
 
 
-def fetch_newsapi_news(query, max_items, timeout_seconds, source_label, stock_code, stock_name):
+def fetch_newsapi_news(
+    query, max_items, timeout_seconds, source_label, stock_code, stock_name
+):
     api_key = os.environ.get("NEWS_API_KEY", "").strip()
     if not api_key:
         return []
@@ -186,7 +181,7 @@ def fetch_newsapi_news(query, max_items, timeout_seconds, source_label, stock_co
         "language": "ja",
         "sortBy": "publishedAt",
         "pageSize": max_items,
-        "apiKey": api_key
+        "apiKey": api_key,
     }
 
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
@@ -201,14 +196,16 @@ def fetch_newsapi_news(query, max_items, timeout_seconds, source_label, stock_co
         if not title or not url:
             continue
 
-        items.append({
-            "source": source_label,
-            "title": title,
-            "url": url,
-            "published_at": published_at,
-            "stock_code": stock_code,
-            "stock_name": stock_name
-        })
+        items.append(
+            {
+                "source": source_label,
+                "title": title,
+                "url": url,
+                "published_at": published_at,
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+            }
+        )
 
         if len(items) >= max_items:
             break
@@ -234,7 +231,7 @@ def fetch_market_overview_news(stocks, max_items, timeout_seconds):
         timeout_seconds=timeout_seconds,
         source_label="newsapi_market",
         stock_code="MARKET",
-        stock_name="全体関連"
+        stock_name="全体関連",
     )
 
 
@@ -244,9 +241,7 @@ def post_to_slack(webhook_url, message, timeout_seconds):
         return False
 
     response = requests.post(
-        webhook_url,
-        json={"text": message},
-        timeout=timeout_seconds
+        webhook_url, json={"text": message}, timeout=timeout_seconds
     )
     response.raise_for_status()
     return True
@@ -302,32 +297,38 @@ def execute_news_pipeline(trigger_source):
     for stock in stocks:
         combined = []
         try:
-            combined.extend(fetch_yahoo_finance_rss(stock, max_per_stock, timeout_seconds))
+            combined.extend(
+                fetch_yahoo_finance_rss(stock, max_per_stock, timeout_seconds)
+            )
         except Exception as ex:
             print(f"Yahoo RSS fetch failed for {stock['code']}: {str(ex)}")
 
         try:
-            combined.extend(fetch_google_news_rss(stock, max_per_stock, timeout_seconds))
+            combined.extend(
+                fetch_google_news_rss(stock, max_per_stock, timeout_seconds)
+            )
         except Exception as ex:
             print(f"Google RSS fetch failed for {stock['code']}: {str(ex)}")
 
         try:
             query = build_search_query(stock["code"], stock["name"])
-            combined.extend(fetch_newsapi_news(
-                query=query,
-                max_items=max_per_stock,
-                timeout_seconds=timeout_seconds,
-                source_label="newsapi_stock",
-                stock_code=stock["code"],
-                stock_name=stock["name"]
-            ))
+            combined.extend(
+                fetch_newsapi_news(
+                    query=query,
+                    max_items=max_per_stock,
+                    timeout_seconds=timeout_seconds,
+                    source_label="newsapi_stock",
+                    stock_code=stock["code"],
+                    stock_name=stock["name"],
+                )
+            )
         except Exception as ex:
             print(f"NewsAPI fetch failed for {stock['code']}: {str(ex)}")
 
         deduped = deduplicate_news(combined)
         stock_news_map[stock["code"]] = {
             "name": stock["name"],
-            "items": deduped[:max_per_stock]
+            "items": deduped[:max_per_stock],
         }
 
     try:
@@ -353,8 +354,9 @@ def execute_news_pipeline(trigger_source):
         "stocks": len(stock_news_map),
         "stock_articles": stock_article_count,
         "market_articles": len(market_news),
-        "posted": posted
+        "posted": posted,
     }
+
 
 def verify_slack_signature(headers, body, secret):
     """
@@ -363,8 +365,8 @@ def verify_slack_signature(headers, body, secret):
     # ヘッダー名が小文字で来る場合も考慮
     headers_lower = {k.lower(): v for k, v in headers.items()}
 
-    slack_signature = headers_lower.get('x-slack-signature')
-    slack_request_timestamp = headers_lower.get('x-slack-request-timestamp')
+    slack_signature = headers_lower.get("x-slack-signature")
+    slack_request_timestamp = headers_lower.get("x-slack-request-timestamp")
 
     if not slack_signature or not slack_request_timestamp:
         return False
@@ -373,93 +375,86 @@ def verify_slack_signature(headers, body, secret):
     if abs(time.time() - int(slack_request_timestamp)) > 60 * 5:
         return False
 
-    sig_basestring = f'v0:{slack_request_timestamp}:{body}'
-    my_signature = 'v0=' + hmac.new(
-        secret.encode('utf-8'),
-        sig_basestring.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
+    sig_basestring = f"v0:{slack_request_timestamp}:{body}"
+    my_signature = (
+        "v0="
+        + hmac.new(
+            secret.encode("utf-8"), sig_basestring.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+    )
 
     return hmac.compare_digest(my_signature, slack_signature)
+
 
 def handle_slack_event(event):
     """
     Slackのコマンドを受信してDynamoDBに書き込む処理
     """
-    headers = event.get('headers', {})
-    body = event.get('body', '')
-    is_base64_encoded = event.get('isBase64Encoded', False)
+    headers = event.get("headers", {})
+    body = event.get("body", "")
+    is_base64_encoded = event.get("isBase64Encoded", False)
 
     if is_base64_encoded:
         import base64
-        body = base64.b64decode(body).decode('utf-8')
 
-    secret = os.environ.get('SLACK_SIGNING_SECRET', '')
+        body = base64.b64decode(body).decode("utf-8")
+
+    secret = os.environ.get("SLACK_SIGNING_SECRET", "")
 
     if not verify_slack_signature(headers, body, secret):
-        return {
-            'statusCode': 401,
-            'body': 'Unauthorized'
-        }
+        return {"statusCode": 401, "body": "Unauthorized"}
 
     # URLエンコードされたフォームデータをパース
     parsed_body = parse_qs(body)
 
-    command_name = parsed_body.get('command', [''])[0].strip()
-    text_param = parsed_body.get('text', [''])[0].strip()
+    command_name = parsed_body.get("command", [""])[0].strip()
+    text_param = parsed_body.get("text", [""])[0].strip()
 
     if command_name in RUN_NEWS_COMMANDS:
         result = execute_news_pipeline(f"slack:{command_name}")
         return {
-            'statusCode': 200,
-            'body': (
+            "statusCode": 200,
+            "body": (
                 f"ニュース収集を実行しました．"
                 f"対象銘柄: {result['stocks']}件，"
                 f"銘柄ニュース: {result['stock_articles']}件，"
                 f"全体ニュース: {result['market_articles']}件．"
-            )
+            ),
         }
 
     if not text_param:
         return {
-            'statusCode': 200,
-            'body': '証券コードを指定してください．例: /add_stock 7203 トヨタ'
+            "statusCode": 200,
+            "body": "証券コードを指定してください．例: /add_stock 7203 トヨタ",
         }
 
     stock_code, stock_name = parse_stock_input(text_param)
     if not stock_code:
-        return {
-            'statusCode': 200,
-            'body': '証券コードを指定してください．'
-        }
+        return {"statusCode": 200, "body": "証券コードを指定してください．"}
 
-    table_name = os.environ.get('TABLE_NAME')
+    table_name = os.environ.get("TABLE_NAME")
     table = dynamodb.Table(table_name)
 
-    timestamp_str = 'LATEST'
+    timestamp_str = "LATEST"
 
     table.put_item(
         Item={
-            'StockID': stock_code,
-            'StockCode': stock_code,
-            'StockName': stock_name,
-            'Timestamp': timestamp_str
+            "StockID": stock_code,
+            "StockCode": stock_code,
+            "StockName": stock_name,
+            "Timestamp": timestamp_str,
         }
     )
 
-    return {
-        'statusCode': 200,
-        'body': f'StockID: {stock_code} を登録しました'
-    }
+    return {"statusCode": 200, "body": f"StockID: {stock_code} を登録しました"}
+
 
 def handle_scheduler_event(event):
     print(f"Received scheduler event: {json.dumps(event, ensure_ascii=False)}")
     execute_news_pipeline("scheduler")
 
-    return {
-        'statusCode': 200,
-        'body': 'Scheduler event processed successfully.'
-    }
+    return {"statusCode": 200, "body": "Scheduler event processed successfully."}
+
 
 def lambda_handler(event, context):
     """
@@ -469,7 +464,7 @@ def lambda_handler(event, context):
     # Function URL由来の http リクエストとは異なる構造を持つ。
     # Function URL経由(Slack)の場合は requestContext.http が存在する。
 
-    if 'requestContext' in event and 'http' in event['requestContext']:
+    if "requestContext" in event and "http" in event["requestContext"]:
         # Slackからのリクエスト (Function URL)
         return handle_slack_event(event)
     else:
