@@ -39,14 +39,28 @@ jobs:
       - name: SAM Deploy
         run: |
           BRANCH_NAME=$(echo ${GITHUB_REF#refs/heads/})
+          STACK_NAME="stock-notifier-mvp-${BRANCH_NAME}"
           if [ "$BRANCH_NAME" = "main" ]; then
             SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET }}"
           else
             SIGNING_SECRET="${{ secrets.SLACK_SIGNING_SECRET_DEV }}"
           fi
+          set +e
           sam deploy --no-confirm-changeset \
                      --no-fail-on-empty-changeset \
-                     --stack-name stock-notifier-mvp-${BRANCH_NAME} \
+                     --stack-name ${STACK_NAME} \
                      --capabilities CAPABILITY_IAM \
                      --resolve-s3 \
                      --parameter-overrides SlackSigningSecret=${SIGNING_SECRET}
+          DEPLOY_EXIT_CODE=$?
+          set -e
+
+          if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+            echo "SAM deploy failed. Showing recent CloudFormation stack events for ${STACK_NAME}."
+            aws cloudformation describe-stack-events \
+              --stack-name ${STACK_NAME} \
+              --max-items 30 \
+              --query 'StackEvents[].[Timestamp,ResourceStatus,LogicalResourceId,ResourceType,ResourceStatusReason]' \
+              --output table || true
+            exit $DEPLOY_EXIT_CODE
+          fi

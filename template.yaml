@@ -20,7 +20,6 @@ Resources:
   StockSubscriptionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "${AWS::StackName}-StockSubscriptions"
       AttributeDefinitions:
         - AttributeName: StockID
           AttributeType: S
