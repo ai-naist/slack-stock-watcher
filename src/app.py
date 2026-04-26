@@ -87,11 +87,22 @@ def get_jquants_api_key():
     return os.environ.get("JQUANTS_API_KEY", "").strip()
 
 
+def get_jquants_base_url():
+    configured = os.environ.get("JQUANTS_BASE_URL", "https://api.jquants.com/v2").strip()
+    if not configured:
+        return "https://api.jquants.com/v2"
+
+    normalized = configured.rstrip("/")
+    if normalized == "https://api.jquants.com":
+        return "https://api.jquants.com/v2"
+    return normalized
+
+
 def fetch_jquants_listed_info(api_key, timeout_seconds):
     if not api_key:
         return []
 
-    base_url = os.environ.get("JQUANTS_BASE_URL", "https://api.jquants.com/v2").strip()
+    base_url = get_jquants_base_url()
     endpoint = f"{base_url.rstrip('/')}/equities/master"
     headers = {"x-api-key": api_key}
 

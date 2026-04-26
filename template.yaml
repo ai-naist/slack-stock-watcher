@@ -41,7 +41,7 @@ Parameters:
   JQuantsBaseUrl:
     Type: String
     Description: "J-Quants API base URL"
-    Default: "https://api.jquants.com"
+    Default: "https://api.jquants.com/v2"
 
 Globals:
   Function:

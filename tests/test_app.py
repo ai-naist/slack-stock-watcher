@@ -11,7 +11,12 @@ os.environ["TABLE_NAME"] = "TestStockSubscriptions"
 os.environ["SLACK_WEBHOOK_URL"] = "https://hooks.slack.test/mock"
 os.environ["NEWS_API_KEY"] = "test_news_api_key"
 
-from src.app import deduplicate_news, find_stock_in_master, lambda_handler
+from src.app import (
+    deduplicate_news,
+    fetch_jquants_listed_info,
+    find_stock_in_master,
+    lambda_handler,
+)
 
 
 def generate_valid_slack_headers_and_body(body_str, secret):
@@ -264,6 +269,22 @@ def test_find_stock_in_master_by_japanese_name_and_english_name():
     assert by_jp["items"][0]["code"] == "36870"
     assert by_en["status"] == "single"
     assert by_en["items"][0]["code"] == "36870"
+
+
+@patch("src.app.requests.get")
+@patch.dict(os.environ, {"JQUANTS_BASE_URL": "https://api.jquants.com"}, clear=False)
+def test_fetch_jquants_listed_info_uses_v2_endpoint_when_base_url_has_no_version(
+    mock_requests_get,
+):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": []}
+    mock_response.raise_for_status.return_value = None
+    mock_requests_get.return_value = mock_response
+
+    fetch_jquants_listed_info("dummy_key", 5)
+
+    called_url = mock_requests_get.call_args[0][0]
+    assert called_url == "https://api.jquants.com/v2/equities/master"
 
 
 @patch("src.app.dynamodb")
