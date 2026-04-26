@@ -606,6 +606,29 @@ def execute_add_stock_command(text_param):
 
     timestamp_str = "LATEST"
 
+    existing_response = table.get_item(
+        Key={
+            "StockID": stock_code,
+            "Timestamp": timestamp_str,
+        }
+    )
+    existing = None
+    if isinstance(existing_response, dict):
+        existing = existing_response.get("Item")
+
+    if existing:
+        name_label = (existing.get("StockName") or stock_name or "（未設定）").strip() or "（未設定）"
+        name_en_label = (existing.get("StockNameEn") or stock_name_en or "（未設定）").strip() or "（未設定）"
+        return {
+            "status": "already_registered",
+            "message": (
+                "銘柄はすでに登録済みです．"
+                f"\n証券コード: {stock_code}"
+                f"\n企業名: {name_label}"
+                f"\n企業名(英語): {name_en_label}"
+            ),
+        }
+
     table.put_item(
         Item={
             "StockID": stock_code,
@@ -1127,7 +1150,12 @@ def handle_internal_slack_command_event(event):
         except Exception as ex:
             print(f"Slack delayed response failed: {str(ex)}")
 
-    status_code = 200 if result["status"] in {"ok", "multiple", "not_found", "invalid"} else 400
+    status_code = (
+        200
+        if result["status"]
+        in {"ok", "already_registered", "multiple", "not_found", "invalid"}
+        else 400
+    )
     return {"statusCode": status_code, "body": result["message"]}
 
 
@@ -1146,7 +1174,8 @@ def handle_add_stock_command_event(event):
 
     status_code = (
         200
-        if result["status"] in {"ok", "multiple", "not_found", "invalid"}
+        if result["status"]
+        in {"ok", "already_registered", "multiple", "not_found", "invalid"}
         else 400
     )
     return {"statusCode": status_code, "body": result["message"]}

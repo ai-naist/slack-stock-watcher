@@ -93,6 +93,38 @@ def test_slack_event_valid_signature_with_stock_name(mock_dynamodb):
 
 
 @patch("src.app.dynamodb")
+def test_slack_event_add_stock_already_registered(mock_dynamodb):
+    mock_table = MagicMock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.get_item.return_value = {
+        "Item": {
+            "StockID": "AAPL",
+            "StockCode": "AAPL",
+            "StockName": "Apple",
+            "StockNameEn": "Apple Inc.",
+            "Timestamp": "LATEST",
+        }
+    }
+
+    body_str = "token=dummy&team_id=T0001&command=/add_stock&text=AAPL"
+    headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
+
+    event = {
+        "requestContext": {"http": {}},
+        "headers": headers,
+        "body": body,
+        "isBase64Encoded": False,
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "銘柄はすでに登録済みです．" in response["body"]
+    assert "証券コード: AAPL" in response["body"]
+    mock_table.put_item.assert_not_called()
+
+
+@patch("src.app.dynamodb")
 def test_slack_event_invalid_signature(mock_dynamodb):
     mock_table = MagicMock()
     mock_dynamodb.Table.return_value = mock_table
