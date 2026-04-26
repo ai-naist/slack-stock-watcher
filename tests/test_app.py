@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import os
 import time
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 # テスト用のダミー環境変数（boto3のインポート前に設定する必要がある）
@@ -14,8 +15,12 @@ os.environ["NEWS_API_KEY"] = "test_news_api_key"
 from src.app import (
     deduplicate_news,
     fetch_jquants_listed_info,
+    fetch_registered_stocks,
+    filter_unsent_news,
     find_stock_in_master,
     lambda_handler,
+    mark_news_as_sent,
+    parse_rss_items,
 )
 
 
@@ -463,3 +468,132 @@ def test_slack_event_add_stock_with_master_lookup_multiple_candidates(mock_dynam
     assert response["statusCode"] == 200
     assert "候補が複数あります" in response["body"]
     subscription_table.put_item.assert_not_called()
+
+
+def test_parse_rss_items_filters_outside_lookback_window():
+    now_utc = datetime(2026, 4, 27, 0, 0, 0, tzinfo=timezone.utc)
+    xml_text = (
+        "<rss><channel>"
+        "<item><title>new</title><link>https://example.com/new</link>"
+        "<pubDate>Sat, 26 Apr 2026 12:00:00 GMT</pubDate></item>"
+        "<item><title>old</title><link>https://example.com/old</link>"
+        "<pubDate>Tue, 14 Apr 2026 12:00:00 GMT</pubDate></item>"
+        "</channel></rss>"
+    )
+
+    items = parse_rss_items(
+        xml_text,
+        source_name="google_news_rss",
+        stock_code="3687",
+        stock_name="フィックスターズ",
+        max_items=None,
+        lookback_days=7,
+        now_utc=now_utc,
+    )
+
+    assert len(items) == 1
+    assert items[0]["title"] == "new"
+
+
+@patch("src.app.dynamodb")
+def test_filter_unsent_news_excludes_already_notified_items(mock_dynamodb):
+    mock_table = MagicMock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.get_item.side_effect = [
+        {"Item": {"StockID": "sent", "Timestamp": "LATEST"}},
+        {},
+    ]
+
+    items = [
+        {
+            "source": "google_news_rss",
+            "title": "already sent",
+            "url": "https://example.com/already",
+            "published_at": "2026-04-27T00:00:00Z",
+            "stock_code": "3687",
+            "stock_name": "フィックスターズ",
+        },
+        {
+            "source": "google_news_rss",
+            "title": "new item",
+            "url": "https://example.com/new",
+            "published_at": "2026-04-27T00:00:00Z",
+            "stock_code": "3687",
+            "stock_name": "フィックスターズ",
+        },
+    ]
+
+    unsent = filter_unsent_news(items, "TestStockSubscriptions")
+
+    assert len(unsent) == 1
+    assert unsent[0]["title"] == "new item"
+
+
+@patch("src.app.dynamodb")
+def test_mark_news_as_sent_writes_dedup_records(mock_dynamodb):
+    mock_table = MagicMock()
+    mock_dynamodb.Table.return_value = mock_table
+
+    mock_batch_writer = MagicMock()
+    mock_table.batch_writer.return_value.__enter__.return_value = mock_batch_writer
+
+    items = [
+        {
+            "source": "newsapi_stock",
+            "title": "n1",
+            "url": "https://example.com/a?utm_source=x",
+            "published_at": "2026-04-27T00:00:00Z",
+            "stock_code": "3687",
+            "stock_name": "フィックスターズ",
+        },
+        {
+            "source": "google_news_rss",
+            "title": "n2",
+            "url": "https://example.com/b",
+            "published_at": "2026-04-27T01:00:00Z",
+            "stock_code": "MARKET",
+            "stock_name": "全体関連",
+        },
+    ]
+
+    written = mark_news_as_sent(
+        items,
+        "TestStockSubscriptions",
+        "2026-04-27T02:00:00Z",
+    )
+
+    assert written == 2
+    assert mock_batch_writer.put_item.call_count == 2
+
+    first_item = mock_batch_writer.put_item.call_args_list[0][1]["Item"]
+    assert first_item["Type"] == "NewsSent"
+    assert first_item["Timestamp"] == "LATEST"
+    assert first_item["Url"] == "https://example.com/a"
+    assert first_item["ExpiresAt"] == 1779847200
+
+
+@patch("src.app.dynamodb")
+def test_fetch_registered_stocks_ignores_news_sent_records(mock_dynamodb):
+    mock_table = MagicMock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.scan.return_value = {
+        "Items": [
+            {
+                "StockID": "3687",
+                "StockCode": "3687",
+                "StockName": "フィックスターズ",
+                "Timestamp": "LATEST",
+            },
+            {
+                "StockID": "__NEWS__#abcdef",
+                "Timestamp": "LATEST",
+                "Type": "NewsSent",
+                "NewsStockCode": "3687",
+            },
+        ]
+    }
+
+    stocks = fetch_registered_stocks()
+
+    assert len(stocks) == 1
+    assert stocks[0]["code"] == "3687"

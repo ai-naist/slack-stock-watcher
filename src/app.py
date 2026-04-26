@@ -4,7 +4,8 @@ import json
 import os
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 import boto3
@@ -31,6 +32,8 @@ ADD_STOCK_COMMANDS = {
 }
 MASTER_META_ID = "__META__"
 MASTER_META_SNAPSHOT_KEY = "LATEST"
+NEWS_SENT_PREFIX = "__NEWS__#"
+NEWS_SENT_LATEST = "LATEST"
 
 
 def get_env_int(name, default):
@@ -693,8 +696,53 @@ def build_search_query(stock_code, stock_name):
     return " OR ".join(tokens)
 
 
-def parse_rss_items(xml_text, source_name, stock_code, stock_name, max_items):
+def parse_datetime_safe(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    try:
+        dt = parsedate_to_datetime(text)
+        if dt is not None:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        pass
+
+    iso_text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso_text)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def is_recent_news(published_at, lookback_days, now_utc):
+    if lookback_days <= 0:
+        return True
+
+    published_dt = parse_datetime_safe(published_at)
+    if published_dt is None:
+        return True
+
+    cutoff = now_utc - timedelta(days=lookback_days)
+    return published_dt >= cutoff
+
+
+def parse_rss_items(
+    xml_text,
+    source_name,
+    stock_code,
+    stock_name,
+    max_items=None,
+    lookback_days=7,
+    now_utc=None,
+):
     items = []
+    now_utc = now_utc or datetime.now(timezone.utc)
     root = ET.fromstring(xml_text)
     for item in root.findall("./channel/item"):
         title = (item.findtext("title") or "").strip()
@@ -702,6 +750,9 @@ def parse_rss_items(xml_text, source_name, stock_code, stock_name, max_items):
         published_at = (item.findtext("pubDate") or "").strip()
 
         if not title or not url:
+            continue
+
+        if not is_recent_news(published_at, lookback_days, now_utc):
             continue
 
         items.append(
@@ -715,7 +766,7 @@ def parse_rss_items(xml_text, source_name, stock_code, stock_name, max_items):
             }
         )
 
-        if len(items) >= max_items:
+        if max_items is not None and max_items > 0 and len(items) >= max_items:
             break
 
     return items
@@ -768,6 +819,10 @@ def fetch_registered_stocks():
     while True:
         response = table.scan(**scan_kwargs)
         for item in response.get("Items", []):
+            stock_id = (item.get("StockID") or "").strip()
+            if stock_id.startswith(NEWS_SENT_PREFIX) or item.get("Type") == "NewsSent":
+                continue
+
             code = normalize_stock_code(item.get("StockCode") or item.get("StockID") or "")
             if not code:
                 continue
@@ -799,7 +854,11 @@ def fetch_yahoo_finance_rss(stock, max_items, timeout_seconds):
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
     response.raise_for_status()
     return parse_rss_items(
-        response.text, "yahoo_finance_rss", stock["code"], stock["name"], max_items
+        response.text,
+        "yahoo_finance_rss",
+        stock["code"],
+        stock["name"],
+        max_items=max_items,
     )
 
 
@@ -811,25 +870,40 @@ def fetch_google_news_rss(stock, max_items, timeout_seconds):
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
     response.raise_for_status()
     return parse_rss_items(
-        response.text, "google_news_rss", stock["code"], stock["name"], max_items
+        response.text,
+        "google_news_rss",
+        stock["code"],
+        stock["name"],
+        max_items=max_items,
     )
 
 
 def fetch_newsapi_news(
-    query, max_items, timeout_seconds, source_label, stock_code, stock_name
+    query,
+    max_items,
+    timeout_seconds,
+    source_label,
+    stock_code,
+    stock_name,
+    lookback_days=7,
+    now_utc=None,
 ):
     api_key = os.environ.get("NEWS_API_KEY", "").strip()
     if not api_key:
         return []
 
     endpoint = os.environ.get("NEWS_API_URL", "https://newsapi.org/v2/everything")
+    now_utc = now_utc or datetime.now(timezone.utc)
+    from_date = (now_utc - timedelta(days=lookback_days)).date().isoformat()
     params = {
         "q": query,
         "language": "ja",
         "sortBy": "publishedAt",
-        "pageSize": max_items,
+        "from": from_date,
         "apiKey": api_key,
     }
+    if max_items is not None and max_items > 0:
+        params["pageSize"] = max_items
 
     response = requests.get(endpoint, params=params, timeout=timeout_seconds)
     response.raise_for_status()
@@ -843,6 +917,9 @@ def fetch_newsapi_news(
         if not title or not url:
             continue
 
+        if not is_recent_news(published_at, lookback_days, now_utc):
+            continue
+
         items.append(
             {
                 "source": source_label,
@@ -854,7 +931,7 @@ def fetch_newsapi_news(
             }
         )
 
-        if len(items) >= max_items:
+        if max_items is not None and max_items > 0 and len(items) >= max_items:
             break
 
     return items
@@ -880,6 +957,74 @@ def fetch_market_overview_news(stocks, max_items, timeout_seconds):
         stock_code="MARKET",
         stock_name="全体関連",
     )
+
+
+def build_news_dedupe_id(item):
+    stock_code = (item.get("stock_code") or "").strip().upper()
+    normalized_url = normalize_url((item.get("url") or "").strip())
+    if not normalized_url:
+        return ""
+
+    key_text = f"{stock_code}|{normalized_url}"
+    digest = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
+    return f"{NEWS_SENT_PREFIX}{digest}"
+
+
+def filter_unsent_news(items, table_name):
+    if not table_name:
+        return items
+
+    table = dynamodb.Table(table_name)
+    unsent = []
+    for item in items:
+        dedupe_id = build_news_dedupe_id(item)
+        if not dedupe_id:
+            continue
+
+        response = table.get_item(Key={"StockID": dedupe_id, "Timestamp": NEWS_SENT_LATEST})
+        if "Item" in response:
+            continue
+
+        unsent.append(item)
+
+    return unsent
+
+
+def mark_news_as_sent(items, table_name, notified_at):
+    if not table_name or not items:
+        return 0
+
+    retention_days = get_env_int("NEWS_SENT_RETENTION_DAYS", 30)
+    notified_dt = parse_datetime_safe(notified_at) or datetime.now(timezone.utc)
+    expires_at = None
+    if retention_days > 0:
+        expires_at = int((notified_dt + timedelta(days=retention_days)).timestamp())
+
+    table = dynamodb.Table(table_name)
+    written = 0
+    with table.batch_writer() as batch:
+        for item in items:
+            dedupe_id = build_news_dedupe_id(item)
+            if not dedupe_id:
+                continue
+
+            record = {
+                "StockID": dedupe_id,
+                "Timestamp": NEWS_SENT_LATEST,
+                "Type": "NewsSent",
+                "Url": normalize_url((item.get("url") or "").strip()),
+                "Source": (item.get("source") or "").strip(),
+                "NewsStockCode": (item.get("stock_code") or "").strip(),
+                "PublishedAt": (item.get("published_at") or "").strip(),
+                "NotifiedAt": notified_at,
+            }
+            if expires_at is not None:
+                record["ExpiresAt"] = expires_at
+
+            batch.put_item(Item=record)
+            written += 1
+
+    return written
 
 
 def post_to_slack(webhook_url, message, timeout_seconds):
@@ -943,9 +1088,10 @@ def execute_news_pipeline(trigger_source):
     print(f"Start news pipeline: {trigger_source}")
 
     timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
-    max_per_stock = get_env_int("MAX_NEWS_PER_STOCK", 5)
-    max_market_news = get_env_int("MAX_MARKET_NEWS", 8)
+    recent_news_days = get_env_int("RECENT_NEWS_DAYS", 7)
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    table_name = os.environ.get("TABLE_NAME", "").strip()
+    now_utc = datetime.now(timezone.utc)
 
     try:
         sync_result = apply_stock_master_diff(timeout_seconds)
@@ -968,14 +1114,14 @@ def execute_news_pipeline(trigger_source):
         combined = []
         try:
             combined.extend(
-                fetch_yahoo_finance_rss(stock, max_per_stock, timeout_seconds)
+                fetch_yahoo_finance_rss(stock, None, timeout_seconds)
             )
         except Exception as ex:
             print(f"Yahoo RSS fetch failed for {stock['code']}: {str(ex)}")
 
         try:
             combined.extend(
-                fetch_google_news_rss(stock, max_per_stock, timeout_seconds)
+                fetch_google_news_rss(stock, None, timeout_seconds)
             )
         except Exception as ex:
             print(f"Google RSS fetch failed for {stock['code']}: {str(ex)}")
@@ -985,26 +1131,40 @@ def execute_news_pipeline(trigger_source):
             combined.extend(
                 fetch_newsapi_news(
                     query=query,
-                    max_items=max_per_stock,
+                    max_items=None,
                     timeout_seconds=timeout_seconds,
                     source_label="newsapi_stock",
                     stock_code=stock["code"],
                     stock_name=stock["name"],
+                    lookback_days=recent_news_days,
+                    now_utc=now_utc,
                 )
             )
         except Exception as ex:
             print(f"NewsAPI fetch failed for {stock['code']}: {str(ex)}")
 
         deduped = deduplicate_news(combined)
+        recents = [
+            item
+            for item in deduped
+            if is_recent_news(item.get("published_at"), recent_news_days, now_utc)
+        ]
+        unsent = filter_unsent_news(recents, table_name)
         stock_news_map[stock["code"]] = {
             "name": stock["name"],
-            "items": deduped[:max_per_stock],
+            "items": unsent,
         }
 
     try:
         market_news = deduplicate_news(
-            fetch_market_overview_news(stocks, max_market_news, timeout_seconds)
-        )[:max_market_news]
+            fetch_market_overview_news(stocks, None, timeout_seconds)
+        )
+        market_news = [
+            item
+            for item in market_news
+            if is_recent_news(item.get("published_at"), recent_news_days, now_utc)
+        ]
+        market_news = filter_unsent_news(market_news, table_name)
     except Exception as ex:
         print(f"Market overview fetch failed: {str(ex)}")
         market_news = []
@@ -1015,6 +1175,21 @@ def execute_news_pipeline(trigger_source):
         posted = post_to_slack(webhook_url, message, timeout_seconds)
     except Exception as ex:
         print(f"Slack post failed: {str(ex)}")
+
+    if posted:
+        sent_items = []
+        for payload in stock_news_map.values():
+            sent_items.extend(payload.get("items", []))
+        sent_items.extend(market_news)
+
+        try:
+            mark_news_as_sent(
+                sent_items,
+                table_name,
+                now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+        except Exception as ex:
+            print(f"Failed to mark sent news: {str(ex)}")
 
     stock_article_count = 0
     for payload in stock_news_map.values():

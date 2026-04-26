@@ -42,6 +42,10 @@ Parameters:
     Type: String
     Description: "J-Quants API base URL"
     Default: "https://api.jquants.com/v2"
+  NewsSentRetentionDays:
+    Type: Number
+    Description: "Retention days for sent-news dedup records"
+    Default: 30
 
 Globals:
   Function:
@@ -66,6 +70,9 @@ Resources:
         - AttributeName: Timestamp
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAt
+        Enabled: true
 
   StockMasterTable:
     Type: AWS::DynamoDB::Table
@@ -100,6 +107,7 @@ Resources:
           MAX_MARKET_NEWS: !Ref MaxMarketNews
           JQUANTS_API_KEY: !Ref JQuantsApiKey
           JQUANTS_BASE_URL: !Ref JQuantsBaseUrl
+          NEWS_SENT_RETENTION_DAYS: !Ref NewsSentRetentionDays
       FunctionUrlConfig:
         AuthType: NONE
       Policies:
