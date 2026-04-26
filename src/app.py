@@ -25,6 +25,10 @@ RUN_MASTER_COMMANDS = {
     "/run_stock_master",
     "/run_stock_master_dev",
 }
+ADD_STOCK_COMMANDS = {
+    "/add_stock",
+    "/add_stock_dev",
+}
 MASTER_META_ID = "__META__"
 MASTER_META_SNAPSHOT_KEY = "LATEST"
 
@@ -45,9 +49,20 @@ def parse_stock_input(text):
         return "", ""
 
     parts = normalized.split(" ", 1)
-    stock_code = parts[0].upper()
+    stock_code = normalize_stock_code(parts[0])
     stock_name = parts[1].strip() if len(parts) > 1 else ""
     return stock_code, stock_name
+
+
+def normalize_stock_code(value):
+    stripped = (value or "").strip().upper()
+    if not stripped:
+        return ""
+
+    digits_only = "".join(ch for ch in stripped if ch.isdigit())
+    if stripped == digits_only and len(digits_only) == 5 and digits_only.endswith("0"):
+        return digits_only[:-1]
+    return stripped
 
 
 def normalize_text(text):
@@ -68,11 +83,15 @@ def extract_search_candidates(text):
 
 def extract_stock_code_variants(value):
     stripped = (value or "").strip().upper()
-    if not stripped:
+    canonical = normalize_stock_code(stripped)
+    if not canonical:
         return []
 
-    variants = [stripped]
-    digits_only = "".join(ch for ch in stripped if ch.isdigit())
+    variants = [canonical]
+    if stripped and stripped not in variants:
+        variants.append(stripped)
+
+    digits_only = "".join(ch for ch in canonical if ch.isdigit())
     if digits_only:
         if digits_only not in variants:
             variants.append(digits_only)
@@ -180,7 +199,7 @@ def find_stock_in_master(master_records, raw_query):
         norm_query = normalize_text(query)
 
         for item in master_records:
-            code = (item.get("StockCode") or item.get("Code") or "").strip().upper()
+            code = get_master_row_code(item)
             if not code:
                 continue
 
@@ -261,7 +280,7 @@ def build_master_payload(row):
 
 
 def get_master_row_code(row):
-    return (row.get("Code") or row.get("StockCode") or "").strip().upper()
+    return normalize_stock_code(row.get("Code") or row.get("StockCode") or "")
 
 
 def write_master_snapshot(table, listed_info, snapshot_at):
@@ -495,6 +514,101 @@ def enqueue_master_command(action):
     return True
 
 
+def enqueue_add_stock_command(command_name, text_param, response_url):
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
+    if not function_name:
+        return False
+
+    payload = {
+        "source": "internal-add-stock-command",
+        "detail-type": "AddStockCommand",
+        "command_name": command_name,
+        "text_param": text_param,
+        "response_url": response_url,
+    }
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    return True
+
+
+def execute_add_stock_command(text_param):
+    if not text_param:
+        return {
+            "status": "invalid",
+            "message": "検索キーを指定してください．例: /add_stock 7203 または /add_stock フィックスターズ",
+        }
+
+    stock_code = ""
+    stock_name = ""
+    stock_name_en = ""
+
+    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
+    if master_table_name:
+        master_table = dynamodb.Table(master_table_name)
+        snapshot_at = get_master_snapshot(master_table)
+        master_records = list_master_records_for_snapshot(master_table, snapshot_at)
+        lookup = find_stock_in_master(master_records, text_param)
+
+        if lookup["status"] == "multiple":
+            lines = ["候補が複数あります．証券コードで指定してください．"]
+            for item in lookup["items"]:
+                label = f"{item['code']} {item['name']}"
+                if item["name_en"]:
+                    label = f"{label} ({item['name_en']})"
+                lines.append(f"・{label}")
+            return {"status": "multiple", "message": "\n".join(lines)}
+
+        if lookup["status"] == "single":
+            matched = lookup["items"][0]
+            stock_code = normalize_stock_code(matched["code"])
+            stock_name = matched["name"]
+            stock_name_en = matched["name_en"]
+        else:
+            return {
+                "status": "not_found",
+                "message": "銘柄マスタに該当がありませんでした．定期同期後に再試行してください．",
+            }
+    else:
+        parsed_code, parsed_name = parse_stock_input(text_param)
+        if not parsed_code:
+            return {
+                "status": "invalid",
+                "message": "検索キーを指定してください．",
+            }
+        stock_code = normalize_stock_code(parsed_code)
+        stock_name = parsed_name
+
+    table_name = os.environ.get("TABLE_NAME")
+    table = dynamodb.Table(table_name)
+
+    timestamp_str = "LATEST"
+
+    table.put_item(
+        Item={
+            "StockID": stock_code,
+            "StockCode": stock_code,
+            "StockName": stock_name,
+            "StockNameEn": stock_name_en,
+            "Timestamp": timestamp_str,
+        }
+    )
+
+    name_label = stock_name if stock_name else "（未設定）"
+    name_en_label = stock_name_en if stock_name_en else "（未設定）"
+    return {
+        "status": "ok",
+        "message": (
+            "銘柄を登録しました．"
+            f"\n証券コード: {stock_code}"
+            f"\n企業名: {name_label}"
+            f"\n企業名(英語): {name_en_label}"
+        ),
+    }
+
+
 def execute_master_command(action):
     timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
 
@@ -611,7 +725,7 @@ def fetch_registered_stocks():
     while True:
         response = table.scan(**scan_kwargs)
         for item in response.get("Items", []):
-            code = (item.get("StockCode") or item.get("StockID") or "").strip().upper()
+            code = normalize_stock_code(item.get("StockCode") or item.get("StockID") or "")
             if not code:
                 continue
 
@@ -732,6 +846,19 @@ def post_to_slack(webhook_url, message, timeout_seconds):
 
     response = requests.post(
         webhook_url, json={"text": message}, timeout=timeout_seconds
+    )
+    response.raise_for_status()
+    return True
+
+
+def post_to_slack_response_url(response_url, message, timeout_seconds):
+    if not response_url:
+        return False
+
+    response = requests.post(
+        response_url,
+        json={"response_type": "ephemeral", "replace_original": False, "text": message},
+        timeout=timeout_seconds,
     )
     response.raise_for_status()
     return True
@@ -909,6 +1036,7 @@ def handle_slack_event(event):
 
     command_name = parsed_body.get("command", [""])[0].strip()
     text_param = parsed_body.get("text", [""])[0].strip()
+    response_url = parsed_body.get("response_url", [""])[0].strip()
 
     if command_name in RUN_NEWS_COMMANDS:
         result = execute_news_pipeline(f"slack:{command_name}")
@@ -948,78 +1076,54 @@ def handle_slack_event(event):
             "body": "AWS_LAMBDA_FUNCTION_NAME が未設定のため実行できません．",
         }
 
-    if not text_param:
+    if command_name and command_name not in ADD_STOCK_COMMANDS:
         return {
             "statusCode": 200,
-            "body": "検索キーを指定してください．例: /add_stock 7203 または /add_stock フィックスターズ",
+            "body": f"未対応のコマンドです．{command_name}",
         }
 
-    stock_code = ""
-    stock_name = ""
-    stock_name_en = ""
+    if response_url:
+        try:
+            queued = enqueue_add_stock_command(command_name, text_param, response_url)
+        except Exception as ex:
+            return {
+                "statusCode": 500,
+                "body": f"add_stockコマンドのキュー投入に失敗しました．{str(ex)}",
+            }
 
-    master_table_name = os.environ.get("MASTER_TABLE_NAME", "").strip()
-    if master_table_name:
-        master_table = dynamodb.Table(master_table_name)
-        snapshot_at = get_master_snapshot(master_table)
-        master_records = list_master_records_for_snapshot(master_table, snapshot_at)
-        lookup = find_stock_in_master(master_records, text_param)
-
-        if lookup["status"] == "multiple":
-            lines = ["候補が複数あります．証券コードで指定してください．"]
-            for item in lookup["items"]:
-                label = f"{item['code']} {item['name']}"
-                if item["name_en"]:
-                    label = f"{label} ({item['name_en']})"
-                lines.append(f"・{label}")
-            return {"statusCode": 200, "body": "\n".join(lines)}
-
-        if lookup["status"] == "single":
-            matched = lookup["items"][0]
-            stock_code = matched["code"]
-            stock_name = matched["name"]
-            stock_name_en = matched["name_en"]
-        else:
+        if queued:
             return {
                 "statusCode": 200,
-                "body": "銘柄マスタに該当がありませんでした．定期同期後に再試行してください．",
+                "body": (
+                    "add_stockコマンドを受け付けました．"
+                    "\nバックグラウンドで処理を開始します．"
+                    "\n完了後に結果を通知します．"
+                ),
             }
-    else:
-        parsed_code, parsed_name = parse_stock_input(text_param)
-        if not parsed_code:
-            return {
-                "statusCode": 200,
-                "body": "検索キーを指定してください．",
-            }
-        stock_code = parsed_code
-        stock_name = parsed_name
 
-    table_name = os.environ.get("TABLE_NAME")
-    table = dynamodb.Table(table_name)
+    result = execute_add_stock_command(text_param)
+    return {"statusCode": 200, "body": result["message"]}
 
-    timestamp_str = "LATEST"
 
-    table.put_item(
-        Item={
-            "StockID": stock_code,
-            "StockCode": stock_code,
-            "StockName": stock_name,
-            "StockNameEn": stock_name_en,
-            "Timestamp": timestamp_str,
-        }
+def handle_add_stock_command_event(event):
+    text_param = (event.get("text_param") or "").strip()
+    response_url = (event.get("response_url") or "").strip()
+
+    result = execute_add_stock_command(text_param)
+    timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
+
+    if response_url:
+        try:
+            post_to_slack_response_url(response_url, result["message"], timeout_seconds)
+        except Exception as ex:
+            print(f"Add stock delayed response failed: {str(ex)}")
+
+    status_code = (
+        200
+        if result["status"] in {"ok", "multiple", "not_found", "invalid"}
+        else 400
     )
-
-    name_label = stock_name if stock_name else "（未設定）"
-    name_en_label = stock_name_en if stock_name_en else "（未設定）"
-    return {
-        "statusCode": 200,
-        "body": (
-            "銘柄を登録しました．"
-            f"\n証券コード: {stock_code}"
-            f"\n企業名: {name_label}"
-            f"\n企業名(英語): {name_en_label}"
-        ),
-    }
+    return {"statusCode": status_code, "body": result["message"]}
 
 
 def handle_scheduler_event(event):
@@ -1054,6 +1158,8 @@ def lambda_handler(event, context):
         return handle_slack_event(event)
     if event.get("source") == "internal-master-command":
         return handle_master_command_event(event)
+    if event.get("source") == "internal-add-stock-command":
+        return handle_add_stock_command_event(event)
     else:
         # Schedulerなどからの直接呼び出し
         return handle_scheduler_event(event)

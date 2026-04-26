@@ -266,9 +266,9 @@ def test_find_stock_in_master_by_japanese_name_and_english_name():
     by_en = find_stock_in_master(master_records, "fixstars")
 
     assert by_jp["status"] == "single"
-    assert by_jp["items"][0]["code"] == "36870"
+    assert by_jp["items"][0]["code"] == "3687"
     assert by_en["status"] == "single"
-    assert by_en["items"][0]["code"] == "36870"
+    assert by_en["items"][0]["code"] == "3687"
 
 
 @patch("src.app.requests.get")
@@ -329,14 +329,38 @@ def test_slack_event_add_stock_with_master_lookup_success(mock_dynamodb):
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "証券コード: 36870" in response["body"]
+    assert "証券コード: 3687" in response["body"]
     assert "企業名: フィックスターズ" in response["body"]
     assert "企業名(英語): Fixstars Corporation" in response["body"]
 
     put_item = subscription_table.put_item.call_args[1]["Item"]
-    assert put_item["StockCode"] == "36870"
+    assert put_item["StockCode"] == "3687"
     assert put_item["StockName"] == "フィックスターズ"
     assert put_item["StockNameEn"] == "Fixstars Corporation"
+
+
+@patch("src.app.lambda_client")
+@patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_NAME": "TestFunction"}, clear=False)
+def test_slack_event_add_stock_dev_returns_immediate_ack(mock_lambda_client):
+    mock_lambda_client.invoke.return_value = {"StatusCode": 202}
+
+    body_str = (
+        "token=dummy&team_id=T0001&command=/add_stock_dev&text=3687"
+        "&response_url=https%3A%2F%2Fhooks.slack.test%2Fresponse"
+    )
+    headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
+    event = {
+        "requestContext": {"http": {}},
+        "headers": headers,
+        "body": body,
+        "isBase64Encoded": False,
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "add_stockコマンドを受け付けました" in response["body"]
+    mock_lambda_client.invoke.assert_called_once()
 
 
 @patch("src.app.dynamodb")
