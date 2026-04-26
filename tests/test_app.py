@@ -135,15 +135,10 @@ def test_scheduler_event_success(mock_execute_news_pipeline):
     mock_execute_news_pipeline.assert_called_once_with("scheduler")
 
 
-@patch("src.app.dynamodb")
-@patch("src.app.execute_news_pipeline")
-def test_slack_event_run_news_command(mock_execute_news_pipeline, mock_dynamodb):
-    mock_execute_news_pipeline.return_value = {
-        "stocks": 2,
-        "stock_articles": 4,
-        "market_articles": 3,
-        "posted": True,
-    }
+@patch("src.app.lambda_client")
+@patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_NAME": "TestFunction"}, clear=False)
+def test_slack_event_run_news_command_returns_immediate_ack(mock_lambda_client):
+    mock_lambda_client.invoke.return_value = {"StatusCode": 202}
 
     body_str = "token=dummy&team_id=T0001&command=/run_news&text="
     headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
@@ -158,10 +153,8 @@ def test_slack_event_run_news_command(mock_execute_news_pipeline, mock_dynamodb)
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "ニュース収集を実行しました．" in response["body"]
-    assert "対象銘柄: 2件" in response["body"]
-    mock_execute_news_pipeline.assert_called_once_with("slack:/run_news")
-    mock_dynamodb.Table.assert_not_called()
+    assert "コマンドを受け付けました" in response["body"]
+    mock_lambda_client.invoke.assert_called_once()
 
 
 @patch("src.app.lambda_client")
@@ -182,8 +175,7 @@ def test_slack_event_run_master_init_command(mock_lambda_client):
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "masterコマンドを受け付けました．" in response["body"]
-    assert "実行モード: init" in response["body"]
+    assert "コマンドを受け付けました" in response["body"]
     mock_lambda_client.invoke.assert_called_once()
 
 
@@ -205,8 +197,7 @@ def test_slack_event_run_master_diff_command(mock_lambda_client):
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "masterコマンドを受け付けました．" in response["body"]
-    assert "実行モード: diff" in response["body"]
+    assert "コマンドを受け付けました" in response["body"]
     mock_lambda_client.invoke.assert_called_once()
 
 
@@ -359,8 +350,37 @@ def test_slack_event_add_stock_dev_returns_immediate_ack(mock_lambda_client):
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "add_stockコマンドを受け付けました" in response["body"]
+    assert "コマンドを受け付けました" in response["body"]
     mock_lambda_client.invoke.assert_called_once()
+
+
+@patch("src.app.post_to_slack_response_url")
+@patch("src.app.execute_news_pipeline")
+def test_internal_slack_command_event_posts_delayed_result(
+    mock_execute_news_pipeline,
+    mock_post_to_slack_response_url,
+):
+    mock_execute_news_pipeline.return_value = {
+        "stocks": 2,
+        "stock_articles": 4,
+        "market_articles": 3,
+        "posted": True,
+    }
+
+    event = {
+        "source": "internal-slack-command",
+        "detail-type": "SlackCommand",
+        "command_name": "/run_news",
+        "text_param": "",
+        "response_url": "https://hooks.slack.test/response",
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "ニュース収集を実行しました．" in response["body"]
+    mock_execute_news_pipeline.assert_called_once_with("slack:/run_news")
+    mock_post_to_slack_response_url.assert_called_once()
 
 
 @patch("src.app.dynamodb")

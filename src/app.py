@@ -496,6 +496,26 @@ def sync_stock_master(timeout_seconds):
     return apply_stock_master_diff(timeout_seconds)
 
 
+def enqueue_slack_command(command_name, text_param, response_url):
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
+    if not function_name:
+        return False
+
+    payload = {
+        "source": "internal-slack-command",
+        "detail-type": "SlackCommand",
+        "command_name": command_name,
+        "text_param": text_param,
+        "response_url": response_url,
+    }
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    return True
+
+
 def enqueue_master_command(action):
     function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
     if not function_name:
@@ -1037,72 +1057,78 @@ def handle_slack_event(event):
     command_name = parsed_body.get("command", [""])[0].strip()
     text_param = parsed_body.get("text", [""])[0].strip()
     response_url = parsed_body.get("response_url", [""])[0].strip()
+    supported_commands = RUN_NEWS_COMMANDS | RUN_MASTER_COMMANDS | ADD_STOCK_COMMANDS
 
-    if command_name in RUN_NEWS_COMMANDS:
-        result = execute_news_pipeline(f"slack:{command_name}")
-        return {
-            "statusCode": 200,
-            "body": (
-                f"ニュース収集を実行しました．"
-                f"対象銘柄: {result['stocks']}件，"
-                f"銘柄ニュース: {result['stock_articles']}件，"
-                f"全体ニュース: {result['market_articles']}件．"
-            ),
-        }
-
-    if command_name in RUN_MASTER_COMMANDS:
-        action = text_param.strip().lower() if text_param else "diff"
-
-        try:
-            queued = enqueue_master_command(action)
-        except Exception as ex:
-            return {
-                "statusCode": 500,
-                "body": f"masterコマンドのキュー投入に失敗しました．{str(ex)}",
-            }
-
-        if queued:
-            return {
-                "statusCode": 200,
-                "body": (
-                    "masterコマンドを受け付けました．"
-                    f"\n実行モード: {action}"
-                    "\nバックグラウンドで処理を開始します．"
-                ),
-            }
-
-        return {
-            "statusCode": 200,
-            "body": "AWS_LAMBDA_FUNCTION_NAME が未設定のため実行できません．",
-        }
-
-    if command_name and command_name not in ADD_STOCK_COMMANDS:
+    if command_name and command_name not in supported_commands:
         return {
             "statusCode": 200,
             "body": f"未対応のコマンドです．{command_name}",
         }
 
+    try:
+        queued = enqueue_slack_command(command_name, text_param, response_url)
+    except Exception as ex:
+        return {
+            "statusCode": 500,
+            "body": f"コマンドのキュー投入に失敗しました．{str(ex)}",
+        }
+
+    if not queued:
+        result = execute_slack_command(command_name, text_param)
+        return {"statusCode": 200, "body": result["message"]}
+
+    return {
+        "statusCode": 200,
+        "body": (
+            "コマンドを受け付けました．"
+            "\nバックグラウンドで処理を開始します．"
+            "\n完了後に結果を通知します．"
+        ),
+    }
+
+
+def execute_slack_command(command_name, text_param):
+    if command_name in RUN_NEWS_COMMANDS:
+        result = execute_news_pipeline(f"slack:{command_name}")
+        return {
+            "status": "ok",
+            "message": (
+                "ニュース収集を実行しました．"
+                f"\n対象銘柄: {result['stocks']}件"
+                f"\n銘柄ニュース: {result['stock_articles']}件"
+                f"\n全体ニュース: {result['market_articles']}件"
+            ),
+        }
+
+    if command_name in RUN_MASTER_COMMANDS:
+        action = text_param.strip().lower() if text_param else "diff"
+        return execute_master_command(action)
+
+    if command_name in ADD_STOCK_COMMANDS:
+        return execute_add_stock_command(text_param)
+
+    return {
+        "status": "invalid",
+        "message": f"未対応のコマンドです．{command_name}",
+    }
+
+
+def handle_internal_slack_command_event(event):
+    command_name = (event.get("command_name") or "").strip()
+    text_param = (event.get("text_param") or "").strip()
+    response_url = (event.get("response_url") or "").strip()
+
+    result = execute_slack_command(command_name, text_param)
+    timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
+
     if response_url:
         try:
-            queued = enqueue_add_stock_command(command_name, text_param, response_url)
+            post_to_slack_response_url(response_url, result["message"], timeout_seconds)
         except Exception as ex:
-            return {
-                "statusCode": 500,
-                "body": f"add_stockコマンドのキュー投入に失敗しました．{str(ex)}",
-            }
+            print(f"Slack delayed response failed: {str(ex)}")
 
-        if queued:
-            return {
-                "statusCode": 200,
-                "body": (
-                    "add_stockコマンドを受け付けました．"
-                    "\nバックグラウンドで処理を開始します．"
-                    "\n完了後に結果を通知します．"
-                ),
-            }
-
-    result = execute_add_stock_command(text_param)
-    return {"statusCode": 200, "body": result["message"]}
+    status_code = 200 if result["status"] in {"ok", "multiple", "not_found", "invalid"} else 400
+    return {"statusCode": status_code, "body": result["message"]}
 
 
 def handle_add_stock_command_event(event):
@@ -1156,6 +1182,8 @@ def lambda_handler(event, context):
     if "requestContext" in event and "http" in event["requestContext"]:
         # Slackからのリクエスト (Function URL)
         return handle_slack_event(event)
+    if event.get("source") == "internal-slack-command":
+        return handle_internal_slack_command_event(event)
     if event.get("source") == "internal-master-command":
         return handle_master_command_event(event)
     if event.get("source") == "internal-add-stock-command":
