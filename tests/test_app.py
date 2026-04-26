@@ -40,7 +40,7 @@ def test_slack_event_valid_signature(mock_dynamodb):
     headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
 
     event = {
-        "requestContext": {"http": {}},  # Function URL経由のリクエストをモック
+        "requestContext": {"http": {}},
         "headers": headers,
         "body": body,
         "isBase64Encoded": False,
@@ -77,6 +77,7 @@ def test_slack_event_valid_signature_with_stock_name(mock_dynamodb):
     }
 
     response = lambda_handler(event, None)
+
     assert response["statusCode"] == 200
     assert "証券コード: 7203" in response["body"]
 
@@ -158,16 +159,10 @@ def test_slack_event_run_news_command(mock_execute_news_pipeline, mock_dynamodb)
     mock_dynamodb.Table.assert_not_called()
 
 
-@patch("src.app.initialize_stock_master")
-def test_slack_event_run_master_init_command(mock_initialize_stock_master):
-    mock_initialize_stock_master.return_value = {
-        "synced": True,
-        "mode": "init",
-        "reason": "ok",
-        "count": 3,
-        "upserted": 3,
-        "deleted": 10,
-    }
+@patch("src.app.lambda_client")
+@patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_NAME": "TestFunction"}, clear=False)
+def test_slack_event_run_master_init_command(mock_lambda_client):
+    mock_lambda_client.invoke.return_value = {"StatusCode": 202}
 
     body_str = "token=dummy&team_id=T0001&command=/run_master&text=init"
     headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
@@ -182,22 +177,15 @@ def test_slack_event_run_master_init_command(mock_initialize_stock_master):
     response = lambda_handler(event, None)
 
     assert response["statusCode"] == 200
-    assert "銘柄マスタ初期化を実行しました．" in response["body"]
-    assert "登録件数: 3件" in response["body"]
-    assert "削除件数: 10件" in response["body"]
-    mock_initialize_stock_master.assert_called_once()
+    assert "masterコマンドを受け付けました．" in response["body"]
+    assert "実行モード: init" in response["body"]
+    mock_lambda_client.invoke.assert_called_once()
 
 
-@patch("src.app.apply_stock_master_diff")
-def test_slack_event_run_master_diff_command(mock_apply_stock_master_diff):
-    mock_apply_stock_master_diff.return_value = {
-        "synced": True,
-        "mode": "diff",
-        "reason": "ok",
-        "count": 120,
-        "upserted": 4,
-        "deleted": 1,
-    }
+@patch("src.app.lambda_client")
+@patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_NAME": "TestFunction"}, clear=False)
+def test_slack_event_run_master_diff_command(mock_lambda_client):
+    mock_lambda_client.invoke.return_value = {"StatusCode": 202}
 
     body_str = "token=dummy&team_id=T0001&command=/run_master&text=diff"
     headers, body = generate_valid_slack_headers_and_body(body_str, "test_secret")
@@ -207,6 +195,31 @@ def test_slack_event_run_master_diff_command(mock_apply_stock_master_diff):
         "headers": headers,
         "body": body,
         "isBase64Encoded": False,
+    }
+
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "masterコマンドを受け付けました．" in response["body"]
+    assert "実行モード: diff" in response["body"]
+    mock_lambda_client.invoke.assert_called_once()
+
+
+@patch("src.app.apply_stock_master_diff")
+def test_internal_master_event_diff_runs_successfully(mock_apply_stock_master_diff):
+    mock_apply_stock_master_diff.return_value = {
+        "synced": True,
+        "mode": "diff",
+        "reason": "ok",
+        "count": 120,
+        "upserted": 4,
+        "deleted": 1,
+    }
+
+    event = {
+        "source": "internal-master-command",
+        "detail-type": "MasterCommand",
+        "master_action": "diff",
     }
 
     response = lambda_handler(event, None)

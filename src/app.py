@@ -12,6 +12,7 @@ import requests
 from boto3.dynamodb.conditions import Attr
 
 dynamodb = boto3.resource("dynamodb")
+lambda_client = boto3.client("lambda")
 RUN_NEWS_COMMANDS = {
     "/run_news",
     "/run_news_dev",
@@ -465,6 +466,58 @@ def sync_stock_master(timeout_seconds):
     return apply_stock_master_diff(timeout_seconds)
 
 
+def enqueue_master_command(action):
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
+    if not function_name:
+        return False
+
+    payload = {
+        "source": "internal-master-command",
+        "detail-type": "MasterCommand",
+        "master_action": action,
+    }
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    return True
+
+
+def execute_master_command(action):
+    timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
+
+    if action in {"init", "initialize", "reset"}:
+        result = initialize_stock_master(timeout_seconds)
+        return {
+            "status": "ok",
+            "message": (
+                "銘柄マスタ初期化を実行しました．"
+                f"\n結果: {result['reason']}"
+                f"\n登録件数: {result['upserted']}件"
+                f"\n削除件数: {result['deleted']}件"
+            ),
+        }
+
+    if action in {"diff", "update", "patch"}:
+        result = apply_stock_master_diff(timeout_seconds)
+        return {
+            "status": "ok",
+            "message": (
+                "銘柄マスタ差分適用を実行しました．"
+                f"\n結果: {result['reason']}"
+                f"\n適用件数: {result['upserted']}件"
+                f"\n削除件数: {result['deleted']}件"
+                f"\n有効件数: {result['count']}件"
+            ),
+        }
+
+    return {
+        "status": "invalid",
+        "message": "実行方法: /run_master init または /run_master diff",
+    }
+
+
 def build_search_query(stock_code, stock_name):
     tokens = [f'"{stock_code}"']
     if stock_name:
@@ -859,37 +912,29 @@ def handle_slack_event(event):
         }
 
     if command_name in RUN_MASTER_COMMANDS:
-        timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
         action = text_param.strip().lower() if text_param else "diff"
 
-        if action in {"init", "initialize", "reset"}:
-            result = initialize_stock_master(timeout_seconds)
+        try:
+            queued = enqueue_master_command(action)
+        except Exception as ex:
             return {
-                "statusCode": 200,
-                "body": (
-                    "銘柄マスタ初期化を実行しました．"
-                    f"\n結果: {result['reason']}"
-                    f"\n登録件数: {result['upserted']}件"
-                    f"\n削除件数: {result['deleted']}件"
-                ),
+                "statusCode": 500,
+                "body": f"masterコマンドのキュー投入に失敗しました．{str(ex)}",
             }
 
-        if action in {"diff", "update", "patch"}:
-            result = apply_stock_master_diff(timeout_seconds)
+        if queued:
             return {
                 "statusCode": 200,
                 "body": (
-                    "銘柄マスタ差分適用を実行しました．"
-                    f"\n結果: {result['reason']}"
-                    f"\n適用件数: {result['upserted']}件"
-                    f"\n削除件数: {result['deleted']}件"
-                    f"\n有効件数: {result['count']}件"
+                    "masterコマンドを受け付けました．"
+                    f"\n実行モード: {action}"
+                    "\nバックグラウンドで処理を開始します．"
                 ),
             }
 
         return {
             "statusCode": 200,
-            "body": "実行方法: /run_master init または /run_master diff",
+            "body": "AWS_LAMBDA_FUNCTION_NAME が未設定のため実行できません．",
         }
 
     if not text_param:
@@ -973,6 +1018,18 @@ def handle_scheduler_event(event):
     return {"statusCode": 200, "body": "Scheduler event processed successfully."}
 
 
+def handle_master_command_event(event):
+    action = (event.get("master_action") or "diff").strip().lower()
+    result = execute_master_command(action)
+    print(
+        "Handled internal master command: "
+        f"action={action} status={result['status']}"
+    )
+    if result["status"] == "ok":
+        return {"statusCode": 200, "body": result["message"]}
+    return {"statusCode": 400, "body": result["message"]}
+
+
 def lambda_handler(event, context):
     """
     Lambdaのエントリーポイント
@@ -984,6 +1041,8 @@ def lambda_handler(event, context):
     if "requestContext" in event and "http" in event["requestContext"]:
         # Slackからのリクエスト (Function URL)
         return handle_slack_event(event)
+    if event.get("source") == "internal-master-command":
+        return handle_master_command_event(event)
     else:
         # Schedulerなどからの直接呼び出し
         return handle_scheduler_event(event)

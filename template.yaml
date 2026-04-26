@@ -89,6 +89,7 @@ Resources:
       Handler: app.lambda_handler
       Environment:
         Variables:
+          AWS_LAMBDA_FUNCTION_NAME: !Ref StockAppFunction
           TABLE_NAME: !Ref StockSubscriptionsTable
           MASTER_TABLE_NAME: !Ref StockMasterTable
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
@@ -107,6 +108,11 @@ Resources:
             TableName: !Ref StockSubscriptionsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref StockMasterTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !GetAtt StockAppFunction.Arn
       Events:
         DailyScheduler:
           Type: Schedule
