@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 os.environ["AWS_DEFAULT_REGION"] = "ap-northeast-1"
 os.environ["SLACK_SIGNING_SECRET"] = "test_secret"
 os.environ["TABLE_NAME"] = "TestStockSubscriptions"
+os.environ["NEWS_SENT_TABLE_NAME"] = "TestNewsSent"
 os.environ["SLACK_WEBHOOK_URL"] = "https://hooks.slack.test/mock"
 os.environ["NEWS_API_KEY"] = "test_news_api_key"
 
@@ -573,7 +574,7 @@ def test_mark_news_as_sent_writes_dedup_records(mock_dynamodb):
 
 
 @patch("src.app.dynamodb")
-def test_fetch_registered_stocks_ignores_news_sent_records(mock_dynamodb):
+def test_fetch_registered_stocks_returns_subscription_rows(mock_dynamodb):
     mock_table = MagicMock()
     mock_dynamodb.Table.return_value = mock_table
     mock_table.scan.return_value = {
@@ -583,12 +584,6 @@ def test_fetch_registered_stocks_ignores_news_sent_records(mock_dynamodb):
                 "StockCode": "3687",
                 "StockName": "フィックスターズ",
                 "Timestamp": "LATEST",
-            },
-            {
-                "StockID": "__NEWS__#abcdef",
-                "Timestamp": "LATEST",
-                "Type": "NewsSent",
-                "NewsStockCode": "3687",
             },
         ]
     }

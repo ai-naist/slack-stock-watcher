@@ -70,6 +70,21 @@ Resources:
         - AttributeName: Timestamp
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+
+  NewsSentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: StockID
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: StockID
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
       TimeToLiveSpecification:
         AttributeName: ExpiresAt
         Enabled: true
@@ -97,6 +112,7 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref StockSubscriptionsTable
+          NEWS_SENT_TABLE_NAME: !Ref NewsSentTable
           MASTER_TABLE_NAME: !Ref StockMasterTable
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
           SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
@@ -113,6 +129,8 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StockSubscriptionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NewsSentTable
         - DynamoDBCrudPolicy:
             TableName: !Ref StockMasterTable
         - Statement:

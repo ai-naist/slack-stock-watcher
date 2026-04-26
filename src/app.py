@@ -819,10 +819,6 @@ def fetch_registered_stocks():
     while True:
         response = table.scan(**scan_kwargs)
         for item in response.get("Items", []):
-            stock_id = (item.get("StockID") or "").strip()
-            if stock_id.startswith(NEWS_SENT_PREFIX) or item.get("Type") == "NewsSent":
-                continue
-
             code = normalize_stock_code(item.get("StockCode") or item.get("StockID") or "")
             if not code:
                 continue
@@ -1090,7 +1086,7 @@ def execute_news_pipeline(trigger_source):
     timeout_seconds = get_env_int("HTTP_TIMEOUT_SECONDS", 5)
     recent_news_days = get_env_int("RECENT_NEWS_DAYS", 7)
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-    table_name = os.environ.get("TABLE_NAME", "").strip()
+    news_sent_table_name = os.environ.get("NEWS_SENT_TABLE_NAME", "").strip()
     now_utc = datetime.now(timezone.utc)
 
     try:
@@ -1149,7 +1145,7 @@ def execute_news_pipeline(trigger_source):
             for item in deduped
             if is_recent_news(item.get("published_at"), recent_news_days, now_utc)
         ]
-        unsent = filter_unsent_news(recents, table_name)
+        unsent = filter_unsent_news(recents, news_sent_table_name)
         stock_news_map[stock["code"]] = {
             "name": stock["name"],
             "items": unsent,
@@ -1164,7 +1160,7 @@ def execute_news_pipeline(trigger_source):
             for item in market_news
             if is_recent_news(item.get("published_at"), recent_news_days, now_utc)
         ]
-        market_news = filter_unsent_news(market_news, table_name)
+        market_news = filter_unsent_news(market_news, news_sent_table_name)
     except Exception as ex:
         print(f"Market overview fetch failed: {str(ex)}")
         market_news = []
@@ -1185,7 +1181,7 @@ def execute_news_pipeline(trigger_source):
         try:
             mark_news_as_sent(
                 sent_items,
-                table_name,
+                news_sent_table_name,
                 now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
         except Exception as ex:
