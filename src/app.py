@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -786,22 +787,34 @@ def normalize_url(url):
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, normalized_query, ""))
 
 
+def normalize_title(title):
+    normalized = " ".join((title or "").strip().split())
+    if not normalized:
+        return ""
+    return re.sub(r"\s+[-|｜－]\s+[^-|｜－]+$", "", normalized)
+
+
 def deduplicate_news(items):
     deduped = []
     seen = set()
 
     for item in items:
+        title = item.get("title") or ""
+        normalized_title = normalize_title(title)
+
         url = (item.get("url") or "").strip()
-        if not url:
+        normalized_url = normalize_url(url)
+
+        dedupe_key = normalized_title if normalized_title else normalized_url
+        if not dedupe_key:
             continue
 
-        normalized = normalize_url(url)
-        if normalized in seen:
+        if dedupe_key in seen:
             continue
 
-        seen.add(normalized)
+        seen.add(dedupe_key)
         copied = dict(item)
-        copied["url"] = normalized
+        copied["url"] = normalized_url
         deduped.append(copied)
 
     return deduped
@@ -957,11 +970,17 @@ def fetch_market_overview_news(stocks, max_items, timeout_seconds):
 
 def build_news_dedupe_id(item):
     stock_code = (item.get("stock_code") or "").strip().upper()
-    normalized_url = normalize_url((item.get("url") or "").strip())
-    if not normalized_url:
-        return ""
+    title = item.get("title") or ""
+    normalized_title = normalize_title(title)
 
-    key_text = f"{stock_code}|{normalized_url}"
+    if normalized_title:
+        key_text = f"{stock_code}|TITLE:{normalized_title}"
+    else:
+        normalized_url = normalize_url((item.get("url") or "").strip())
+        if not normalized_url:
+            return ""
+        key_text = f"{stock_code}|URL:{normalized_url}"
+
     digest = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
     return f"{NEWS_SENT_PREFIX}{digest}"
 
