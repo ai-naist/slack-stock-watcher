@@ -1,7 +1,7 @@
 # Serverless Stock Application (MVP)
 
 このプロジェクトは、AWS SAMを用いたサーバーレスアプリケーションの最小構成（MVP）です。
-Slackからのスラッシュコマンドを受信し、EventBridge Schedulerから定期的に処理を実行する機能を提供します。
+Slackからのスラッシュコマンドを受信し、EventBridgeの定期トリガーで処理を実行する機能を提供します。
 
 ## アーキテクチャ
 
@@ -10,8 +10,8 @@ Slackからのスラッシュコマンドを受信し、EventBridge Schedulerか
   * Slackからのリクエストについては、別関数で署名検証（`X-Slack-Signature`）を行い、不正なリクエストをブロックします。
 * **Lambda Function URLs**: `AUTH_TYPE: NONE` でインターネットに公開され、Slackからのリクエストを受け付けます。
 * **Amazon DynamoDB**: `StockSubscriptions` テーブル。Partition Keyは `StockID` (String)、Sort Keyは `Timestamp` (String) です。
-* **Amazon EventBridge Scheduler**: 1日1回 (`rate(1 days)`) 定期実行を行います。
-  * Schedulerのイベントは `{"source": "scheduler", "detail-type": "Daily Execution"}` のような形式で送出される想定です。
+* **Amazon EventBridge の定期トリガー**: 1日1回 (`rate(1 day)`) 定期実行を行います。
+  * 定期実行時には `{"source": "scheduler", "detail-type": "Daily Execution"}` を入力としてLambdaに渡します。
 
 ## デプロイ方法
 
@@ -24,3 +24,78 @@ Slackからのスラッシュコマンドを受信し、EventBridge Schedulerか
   * `SLACK_SIGNING_SECRET`: Slack Appの設定から取得できるSigning Secret
 2. 認証情報はGitHub Actionsから自動注入されるため、`template.yaml` や `src/app.py`、`.github/workflows/deploy.yml` にシークレット値を直接記述しないでください。
 3. `main` ブランチへPushすると、`.github/workflows/deploy.yml` に定義されたデプロイジョブが実行されます。
+
+### 追加設定（ニュース収集・通知）
+
+ニュース収集機能とSlack自動通知を利用する場合は，以下のSecretsを追加してください．
+
+* `SLACK_WEBHOOK_URL`: 本番環境のSlack Incoming Webhook URL
+* `SLACK_WEBHOOK_URL_DEV`: 開発環境のSlack Incoming Webhook URL
+* `NEWS_API_KEY`: 本番環境のNewsAPIキー
+* `NEWS_API_KEY_DEV`: 開発環境のNewsAPIキー
+* `JQUANTS_API_KEY`: J-Quants APIキー（main/dev共通で利用）
+
+`main` ブランチでは本番用Secrets，`dev` ブランチでは開発用Secretsが自動的に使い分けられます．
+
+J-Quants は公式CLI仕様に合わせて APIキー認証（`x-api-key`）で利用します．
+`JQUANTS_BASE_URL` はデフォルトで `https://api.jquants.com/v2` を利用します．
+
+## 現在のニュース収集仕様
+
+定期実行時に，DynamoDBに登録された監視銘柄を読み取り，以下3系統からニュースを取得します．
+
+* Yahoo Finance RSS
+* Google News RSS
+* NewsAPI
+
+取得時の検索クエリは「証券コード OR 銘柄名」です．
+取得対象は直近1週間（7日）で，件数上限は設けていません．
+複数ソースで同じ記事が見つかった場合は，URL正規化後に重複排除してからSlackに投稿します．
+一度通知したニュースURLはDynamoDBに記録され，同じ銘柄コードに対して再通知されません．
+通知履歴はTTLで自動削除され，保持期間は `NewsSentRetentionDays`（デフォルト30日）で調整できます．
+登録銘柄（`StockSubscriptionsTable`）と通知履歴（`NewsSentTable`）は別テーブルで管理します．
+
+また，定期実行の先頭でJ-Quants APIから銘柄一覧を同期し，銘柄マスタを更新します．
+
+## Slackコマンド仕様
+
+監視銘柄の登録は以下形式です．
+
+```text
+/add_stock <検索キー>
+```
+
+例:
+
+```text
+/add_stock 3687
+/add_stock フィックスターズ
+/add_stock Fixstars
+```
+
+検索キーには，証券コード・企業名（日本語）・企業名（英語）が利用できます．
+追加成功時には確認用に証券コード，企業名（日本語），企業名（英語）を応答します．
+複数候補がある場合は候補一覧を返し，登録は行いません．
+
+ニュース収集フローを手動実行する場合は以下コマンドを使います．
+
+```text
+/run_news
+```
+
+`/run_news` は定期実行と同じ処理をその場で実行し，取得件数をSlack応答で返します．
+
+銘柄マスタを手動更新する場合は以下コマンドを使います．
+
+```text
+/run_master diff
+/run_master init
+```
+
+* `diff`: 既存マスタへ差分を適用（追加・更新・削除）
+* `init`: マスタを初期化（全件削除後に再構築）
+
+`/run_master` 系コマンドは，Slackタイムアウト回避のため受け付け後に非同期で実行されます．
+
+開発環境のSlack Appでは，設定済みの開発用コマンド（例: `/add_stock_dev`）を利用してください．
+開発環境で手動実行する場合は `/run_news_dev` を利用してください．
